@@ -1,3 +1,15 @@
+## [1.0.8] - 2026-06-04
+### Added
+- Packaging Sync: Fully synchronized pyproject.toml hatchling versioning with pip dist-info metadata.
+- Interactive Progress UI: Live terminal dashboard displaying Processed URLs, Downloaded Assets, Failed Assets, Queue Size, Elapsed Time, and Current URL during `jaguar clone`.
+- Added `jaguar version` command revealing installation type (Editable vs Standard) and package path.
+- Completely redesigned `JAGUAR` CLI banner to use `rich.panel.Panel` and automatic center alignment, preventing ASCII distortion.
+
+### Fixed
+- Fixed Clone Health Accuracy calculating `100%` on non-existent websites by adding a root fetch abort and strict `index.html` fallback.
+- Added strict fallback prioritization for Site Language (`config` -> `Header/HTML` -> `OS Locale`) preventing arbitrary translations of cloned SPAs.
+- Handled graceful exit of the progress UI upon clone completion to avoid hanging threads.
+
 ## [1.0.7] - 2026-06-04
 ### Added
 - Language Preservation: Accurately detects and passes the original site locale (`html lang`, `Content-Language` header, or OS default) to Playwright and clone reports to prevent unexpected translation issues.

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jaguar"
-version = "1.0.7"
+dynamic = ["version"]
 description = "JAGUAR by anayssa — The most advanced open-source Website Intelligence Platform"
 readme = "README.md"
 license = "MIT"
@@ -74,6 +74,9 @@ Issues = "https://github.com/anayssa/jaguar/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jaguar"]
+
+[tool.hatch.version]
+path = "src/jaguar/__init__.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,10 +1,26 @@
 # JAGUAR Installation Guide
 
-JAGUAR is a pure-Python Website Intelligence Platform that runs on any modern OS.
+JAGUAR (v1.0.8) supports local installation via pip.
 
 ## Prerequisites
-- Python 3.12 or newer
-- `pip` package manager
+- Python 3.12+
+- Git
+
+## Install from Source (Editable)
+```bash
+git clone https://github.com/anayssa/jaguar.git
+cd jaguar
+pip install -e .
+```
+
+## Verification
+Run `jaguar version` to verify your installation:
+```
+Version: 1.0.8
+Install Type: Editable
+Project Path: D:\JAGUAR
+Package Path: D:\JAGUAR\src
+```
 
 ## Quick Start (All Platforms)
 

@@ -53,6 +53,9 @@ console = Console()
 
 def display_banner() -> None:
     """Print the JAGUAR premium ASCII banner."""
+    from rich.panel import Panel
+    from rich.align import Align
+    
     banner = """
 [bold cyan]██████████████████████████████████████████████████[/bold cyan]
 [bold cyan]█[/bold cyan] [bold white]██╗ █████╗  ██████╗ ██╗   ██╗ █████╗ ██████╗[/bold white] [bold cyan]█[/bold cyan]
@@ -63,12 +66,13 @@ def display_banner() -> None:
 [bold cyan]█[/bold cyan] [bold white]╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝[/bold white] [bold cyan]█[/bold cyan]
 [bold cyan]██████████████████████████████████████████████████[/bold cyan]
 """
-    console.print(banner, justify="center")
-
-    version_text = Text(f"JAGUAR v{__version__} by anayssa", style="bold magenta", justify="center")
-    subtitle_text = Text("Website Intelligence Platform", style="dim", justify="center")
-    console.print(version_text)
-    console.print(subtitle_text)
+    panel = Panel(
+        Align(banner.strip(), align="center"),
+        border_style="cyan",
+        title=f"JAGUAR v{__version__} by anayssa",
+        subtitle="Website Intelligence Platform",
+    )
+    console.print(Align(panel, align="center"))
     console.print()
 
 
@@ -129,6 +133,33 @@ def cli(ctx: click.Context, debug: bool) -> None:
 
 
 @cli.command()
+def version() -> None:
+    """Print the JAGUAR version and installation details."""
+    import importlib.metadata
+    import importlib.util
+    import os
+    
+    try:
+        ver = importlib.metadata.version("jaguar")
+    except importlib.metadata.PackageNotFoundError:
+        ver = "Unknown (not installed via pip)"
+        
+    spec = importlib.util.find_spec("jaguar")
+    pkg_path = spec.origin if spec else "Unknown"
+    if pkg_path and pkg_path.endswith("__init__.py"):
+        pkg_path = os.path.dirname(os.path.dirname(pkg_path))
+        
+    project_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    
+    install_type = "Standard"
+    if pkg_path and os.path.abspath(pkg_path).lower() == os.path.abspath(os.path.join(project_path, "src")).lower():
+        install_type = "Editable"
+        
+    click.echo(f"Version: {ver}")
+    click.echo(f"Install Type: {install_type}")
+    click.echo(f"Project Path: {project_path}")
+    click.echo(f"Package Path: {pkg_path}")
+@cli.command()
 @click.argument("url")
 @click.option(
     "--format",
@@ -186,16 +217,58 @@ def clone(url: str, depth: int, pages: int, spa: bool, serve: bool, verify: bool
     """Clone a website for offline viewing."""
 
     async def _clone() -> None:
-        click.echo(f"Initializing JAGUAR Cloner for {url}...")
+        click.echo(f"Initializing JAGUAR Cloner for {url}...\n")
         from jaguar.config import load_config
         cfg = load_config()
         clone_dir = cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones")
 
-        engine = ClonerEngine(max_depth=depth, max_pages=pages, render_spa=spa, verify=verify, output_dir=clone_dir)
+        engine = ClonerEngine(max_depth=depth, max_pages=pages, render_spa=spa, verify=verify, output_dir=clone_dir, config=cfg)
 
         import time
         start_time = time.time()
-        output_dir = await engine.clone(url)
+        
+        from rich.progress import Progress, SpinnerColumn, TextColumn
+        from rich.live import Live
+        from rich.panel import Panel
+
+        clone_task = asyncio.create_task(engine.clone(url))
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True,
+        ) as progress:
+            task_id = progress.add_task("[cyan]Cloning website...", total=None)
+            
+            while not clone_task.done():
+                elapsed = int(time.time() - start_time)
+                mins, secs = divmod(elapsed, 60)
+                hours, mins = divmod(mins, 60)
+                elapsed_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
+                
+                queue_size = engine._queue.qsize() + engine._assets_queue.qsize()
+                processed = len(engine._visited)
+                assets = len(engine._assets_visited)
+                failed = getattr(engine, "failed_assets_count", 0)
+                current = getattr(engine, "current_url", "")
+                if len(current) > 50:
+                    current = current[:47] + "..."
+                
+                desc = (
+                    f"[bold cyan]Cloning...[/bold cyan]\n"
+                    f"Processed URLs:    [white]{processed}[/white]\n"
+                    f"Downloaded Assets: [white]{assets}[/white]\n"
+                    f"Failed Assets:     [red]{failed}[/red]\n"
+                    f"Queue Size:        [yellow]{queue_size}[/yellow]\n"
+                    f"Elapsed Time:      [magenta]{elapsed_str}[/magenta]\n"
+                    f"Current:           [dim]{current}[/dim]"
+                )
+                progress.update(task_id, description=desc)
+                await asyncio.sleep(0.2)
+                
+        output_dir = clone_task.result()
+
         elapsed = time.time() - start_time
         mins, secs = divmod(int(elapsed), 60)
         hours, mins = divmod(mins, 60)
@@ -212,6 +285,10 @@ def clone(url: str, depth: int, pages: int, spa: bool, serve: bool, verify: bool
                 c.resolved for c in [report.css, report.js, report.images, report.fonts, report.svg, report.manifest, report.media]
             )
             click.echo(f"Assets Downloaded: {downloaded}")
+            
+            failed = getattr(engine, "failed_assets_count", 0)
+            click.echo(f"Failed Assets: {failed}")
+            
             click.echo(f"Missing Assets: {report.total_missing}")
 
             if engine.visual_result and engine.visual_result.accuracy >= 0:

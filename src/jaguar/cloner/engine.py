@@ -64,8 +64,12 @@ class ClonerEngine:
         self.base_url = ""
         self.site_language = ""
         self.language_source = ""
+        self.failed_assets_count = 0
+        self.current_url = ""
 
     async def _detect_language(self, url: str) -> None:
+        user_lang = self.config.get("cloner", {}).get("language")
+        
         self.language_source = "OS Locale"
         import locale
         loc, _ = locale.getdefaultlocale()
@@ -90,8 +94,15 @@ class ClonerEngine:
                     if lang_attr:
                         self.site_language = str(lang_attr)
                         self.language_source = "HTML"
+                        return
         except Exception as e:
             logger.debug("Failed to detect language: %s", e)
+            # If the root URL fails completely here, we must raise so the cloner stops!
+            raise RuntimeError(f"Failed to fetch initial URL: {url}. Server may be down or nonexistent.") from e
+            
+        if user_lang:
+            self.site_language = user_lang
+            self.language_source = "User Configured"
 
     async def clone(self, url: str) -> str:
         """
@@ -271,6 +282,7 @@ class ClonerEngine:
         while True:
             try:
                 url, depth = await self._queue.get()
+                self.current_url = url
 
                 if len(self._visited) >= self.max_pages:
                     # Drain remaining queue instantly
@@ -296,11 +308,13 @@ class ClonerEngine:
         while True:
             try:
                 url = await self._assets_queue.get()
+                self.current_url = url
                 await self._download_asset(url, base_dir)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Error downloading asset %s: %s", url, e)
+                self.failed_assets_count += 1
             finally:
                 self._assets_queue.task_done()
 
