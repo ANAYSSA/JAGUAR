@@ -20,7 +20,18 @@ from rich.text import Text
 
 if sys.platform == "win32":
     with contextlib.suppress(Exception):
-        getattr(sys.stdout, 'reconfigure')(encoding='utf-8')
+        sys.stdout.reconfigure(encoding='utf-8')
+    from asyncio.proactor_events import _ProactorBasePipeTransport
+    from functools import wraps
+    def silence_event_loop_closed(func): # type: ignore
+        @wraps(func)
+        def wrapper(self, *args, **kwargs): # type: ignore
+            try:
+                return func(self, *args, **kwargs)
+            except (RuntimeError, ValueError):
+                pass
+        return wrapper
+    _ProactorBasePipeTransport.__del__ = silence_event_loop_closed(_ProactorBasePipeTransport.__del__) # type: ignore
 
 from jaguar import __version__
 from jaguar.analyzers import get_all_analyzers
@@ -134,11 +145,12 @@ def cli(ctx: click.Context, debug: bool) -> None:
     help="Disable Playwright browser (disables accessibility, SPA, UX deep checks).",
 )
 @click.option("--no-store", is_flag=True, help="Do not save scan to history.")
-def scan(url: str, format: str, output: str | None, no_browser: bool, no_store: bool) -> None:
+@click.option("--enterprise", is_flag=True, help="Enable Enterprise Mode (multi-UA, WAF evasion).")
+def scan(url: str, format: str, output: str | None, no_browser: bool, no_store: bool, enterprise: bool) -> None:
     """Analyze a single website."""
 
     async def _scan() -> None:
-        engine = ScanEngine(use_browser=not no_browser)
+        engine = ScanEngine(use_browser=not no_browser, enterprise_mode=enterprise)
 
         click.echo(f"Starting JAGUAR scan for {url}...")
         result = await engine.scan(url)
@@ -326,6 +338,83 @@ def diff(scan_a_id: str, scan_b_id: str) -> None:
         click.echo(f"\n--- {cat.upper()} ---")
         for d in deltas:
             click.echo(f"{d.label}: A={d.value_a} | B={d.value_b} | Diff={d.delta}")
+
+
+@cli.command()
+@click.argument("url")
+def explain(url: str) -> None:
+    """Transparency mode: Explain exactly why a score was assigned."""
+
+    async def _explain() -> None:
+        click.echo(f"Running transparent scan for {url}...\n")
+        engine = ScanEngine(enterprise_mode=True)
+        scan_res = await engine.scan(url)
+
+        from rich.console import Console
+        from rich.panel import Panel
+
+        console = Console()
+        console.print(Panel(f"[bold cyan]JAGUAR Transparency Report for {scan_res.url}[/bold cyan]"))
+
+        console.print(f"[bold]Overall Confidence:[/bold] {scan_res.confidence}%")
+        if scan_res.overall_score:
+            console.print(f"[bold]Overall Score:[/bold] {scan_res.overall_score.score} ({scan_res.overall_score.grade})")
+
+        console.print("\n[bold magenta]1. Detected Headers[/bold magenta]")
+        if scan_res.headers:
+            for k, v in scan_res.headers.items():
+                console.print(f"  {k}: {v}")
+        else:
+            console.print("  [dim]None[/dim]")
+
+        console.print("\n[bold magenta]2. Detected Cookies[/bold magenta]")
+        if scan_res.cookies:
+            for c in scan_res.cookies:
+                console.print(f"  {c.get('name')}: Secure={c.get('secure')} HttpOnly={c.get('httponly')} SameSite={c.get('samesite')}")
+        else:
+            console.print("  [dim]None[/dim]")
+
+        console.print("\n[bold magenta]3. Redirect Chain[/bold magenta]")
+        if scan_res.redirect_chain:
+            for i, hop in enumerate(scan_res.redirect_chain):
+                console.print(f"  {i+1}. {hop}")
+        else:
+            console.print("  [dim]None[/dim]")
+
+        console.print("\n[bold magenta]4. Detected Technologies[/bold magenta]")
+        if scan_res.tech_stack:
+            for tech in scan_res.tech_stack:
+                console.print(f"  * {tech.name} ({tech.category}) - {tech.confidence*100:.0f}% confidence")
+        else:
+            console.print("  [dim]None[/dim]")
+
+        console.print("\n[bold magenta]5. Security Score Breakdown[/bold magenta]")
+        sec_res = scan_res.analyzer_results.get("security")
+        if sec_res:
+            for title, modifier in sec_res.score_explanation.breakdown.items():
+                console.print(f"  * {title}: {'+' if modifier > 0 else ''}{modifier}")
+
+            console.print("\n[bold magenta]6. Security Evidence[/bold magenta]")
+            for f in sec_res.findings:
+                status = "[bold green]PASSED[/bold green]" if f.passed else "[bold red]FAILED[/bold red]"
+                console.print(f"\n[bold]{f.title}[/bold] (Status: {status})")
+                console.print(f"Received:\n  {f.raw_value or 'None'}")
+                console.print(f"Expected:\n  {f.expected_value or 'None'}")
+                console.print(f"Why it failed:\n  {f.failure_reason or 'N/A'}")
+                console.print(f"Source:\n  {f.source}")
+
+        console.print("\n[bold magenta]7. SEO Evidence[/bold magenta]")
+        seo_res = scan_res.analyzer_results.get("seo")
+        if seo_res:
+            for f in seo_res.findings:
+                status = "[bold green]PASSED[/bold green]" if f.passed else "[bold red]FAILED[/bold red]"
+                console.print(f"\n[bold]{f.title}[/bold] (Status: {status})")
+                console.print(f"Received:\n  {f.raw_value or 'None'}")
+                console.print(f"Expected:\n  {f.expected_value or 'None'}")
+                console.print(f"Why it failed:\n  {f.failure_reason or 'N/A'}")
+                console.print(f"Source:\n  {f.source}")
+
+    _run_async(_explain())
 
 
 @cli.command()

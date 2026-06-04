@@ -114,10 +114,10 @@ class BrowserManager:
         *,
         wait_until: str = "networkidle",
         timeout: int = 30000,
-    ) -> None:
-        """Navigate to a URL and wait for the page to load."""
+    ) -> Any:
+        """Navigate to a URL and wait for the page to load. Returns the Response object."""
         try:
-            await page.goto(url, wait_until=wait_until, timeout=timeout)
+            return await page.goto(url, wait_until=wait_until, timeout=timeout)
         except Exception as e:
             logger.warning(
                 "Navigation to %s with wait_until=%s failed: %s. Retrying with 'load'.",
@@ -126,7 +126,7 @@ class BrowserManager:
                 e,
             )
             try:
-                await page.goto(url, wait_until="load", timeout=timeout)
+                return await page.goto(url, wait_until="load", timeout=timeout)
             except Exception as e2:
                 logger.error("Navigation to %s failed: %s", url, e2)
                 raise

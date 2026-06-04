@@ -4,6 +4,12 @@ All notable changes to JAGUAR will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-06-04
+### Fixed
+- **Enterprise Calibration**: Fixed false positive security header detection behind WAFs by incorporating a browser-based HTTP fallback capture mechanism in `ScanEngine`.
+- **Async Resource Cleanup**: Safely suppress buggy `ProactorEventLoop` pipe closure exceptions (`ValueError: I/O operation on closed pipe`) on Windows platforms to prevent trailing output noise after scans.
+- **Reporting Engine**: Improved accuracy and output format of `jaguar explain` (Security Evidence Mode), surfacing precise findings, raw headers, expected values, and detection sources.
+
 ## [1.0.1] - 2026-06-04
 ### Fixed
 - **HTTP Client**: Fixed `TypeError` crash in `HttpClient` when parsing boolean cookie attributes (`secure`, `httponly`).

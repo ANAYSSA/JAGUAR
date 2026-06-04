@@ -93,8 +93,12 @@ def build_score_explanation(
     penalties: list[str] = []
     bonuses: list[str] = []
     improvements: list[str] = []
+    breakdown: dict[str, int] = {}
 
     for f in findings:
+        if f.score_modifier != 0:
+            breakdown[f.title] = f.score_modifier
+
         if f.score_modifier < 0:
             penalties.append(f"{f.title}: {f.score_modifier} pts — {f.description}")
         elif f.score_modifier > 0:
@@ -124,6 +128,8 @@ def build_score_explanation(
         penalties=penalties,
         bonuses=bonuses,
         improvements=improvements,
+        breakdown=breakdown,
+        confidence=100.0,
     )
 
 

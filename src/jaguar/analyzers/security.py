@@ -48,14 +48,14 @@ class SecurityAnalyzer(BaseAnalyzer):
         findings.append(self._check_https(context))
         findings.append(self._check_tls(context))
         findings.append(self._check_certificate(context))
-        findings.append(self._check_hsts(context))
-        findings.append(self._check_csp(context))
-        findings.extend(self._check_cookies(context))
+        findings.append(await self._check_hsts(context))
+        findings.append(await self._check_csp(context))
+        findings.extend(await self._check_cookies(context))
         findings.append(self._check_cors(context))
         findings.append(self._check_referrer_policy(context))
         findings.append(self._check_permissions_policy(context))
         findings.append(self._check_x_frame_options(context))
-        findings.append(self._check_x_content_type_options(context))
+        findings.append(await self._check_x_content_type_options(context))
         findings.append(self._check_x_xss_protection(context))
         findings.append(self._check_redirect_security(context))
 
@@ -172,9 +172,29 @@ class SecurityAnalyzer(BaseAnalyzer):
             data={"days_until_expiry": days},
         )
 
-    def _check_hsts(self, ctx: ScanContext) -> Finding:
+    async def _check_hsts(self, ctx: ScanContext) -> Finding:
         """Check HTTP Strict Transport Security header."""
         hsts = ctx.response_headers.get("Strict-Transport-Security", "")
+
+        source = "Final Response Headers"
+
+        # Enterprise Mode WAF bypass
+        if not hsts and ctx.config.get("enterprise_mode") and ctx.http:
+            alt_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            try:
+                alt_resp = await ctx.http.get(ctx.url, use_cache=False, extra_headers=alt_headers)
+                hsts = alt_resp.headers.get("Strict-Transport-Security", "")
+                if hsts:
+                    ctx.config["hsts_waf_bypassed"] = True
+                    source = "Alternate User-Agent Request"
+            except Exception:
+                pass
+
+        # Playwright fallback
+        if not hsts and ctx.playwright_headers:
+            hsts = ctx.playwright_headers.get("strict-transport-security", "")
+            if hsts:
+                source = "Playwright Browser Verification"
 
         if not hsts:
             return Finding(
@@ -185,6 +205,10 @@ class SecurityAnalyzer(BaseAnalyzer):
                 severity=Severity.HIGH,
                 score_modifier=-20,
                 recommendation="Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains; preload' header.",
+                raw_value="None",
+                expected_value="Strict-Transport-Security header",
+                failure_reason="Header is missing entirely.",
+                source=source
             )
 
         try:
@@ -210,6 +234,10 @@ class SecurityAnalyzer(BaseAnalyzer):
                     severity=Severity.MEDIUM,
                     score_modifier=-20,
                     recommendation="Fix the Strict-Transport-Security header format.",
+                    raw_value=hsts,
+                    expected_value="Strict-Transport-Security: max-age=...",
+                    failure_reason="Could not parse max-age directive.",
+                    source=source
                 )
 
             six_months = 15552000
@@ -223,6 +251,10 @@ class SecurityAnalyzer(BaseAnalyzer):
                     score_modifier=-10,
                     data={"max_age": max_age},
                     recommendation="Increase HSTS max-age to at least 31536000 (1 year).",
+                    raw_value=hsts,
+                    expected_value=f"max-age >= {six_months}",
+                    failure_reason=f"max-age of {max_age} is less than {six_months}",
+                    source=source
                 )
 
             modifier = 0
@@ -241,6 +273,10 @@ class SecurityAnalyzer(BaseAnalyzer):
                     "includeSubDomains": include_subdomains,
                     "preload": preload,
                 },
+                raw_value=hsts,
+                expected_value="Valid HSTS header",
+                failure_reason=None,
+                source=source
             )
 
         except (ValueError, IndexError):
@@ -252,11 +288,34 @@ class SecurityAnalyzer(BaseAnalyzer):
                 severity=Severity.MEDIUM,
                 score_modifier=-20,
                 recommendation="Fix the Strict-Transport-Security header format.",
+                raw_value=hsts,
+                expected_value="Strict-Transport-Security: max-age=...",
+                failure_reason="Invalid header syntax."
             )
 
-    def _check_csp(self, ctx: ScanContext) -> Finding:
+    async def _check_csp(self, ctx: ScanContext) -> Finding:
         """Check Content Security Policy header."""
         csp = ctx.response_headers.get("Content-Security-Policy", "")
+
+        source = "Final Response Headers"
+
+        # Enterprise Mode WAF bypass
+        if not csp and ctx.config.get("enterprise_mode") and ctx.http:
+            alt_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            try:
+                alt_resp = await ctx.http.get(ctx.url, use_cache=False, extra_headers=alt_headers)
+                csp = alt_resp.headers.get("Content-Security-Policy", "")
+                if csp:
+                    ctx.config["csp_waf_bypassed"] = True
+                    source = "Alternate User-Agent Request"
+            except Exception:
+                pass
+
+        # Playwright fallback
+        if not csp and ctx.playwright_headers:
+            csp = ctx.playwright_headers.get("content-security-policy", "")
+            if csp:
+                source = "Playwright Browser Verification"
 
         if not csp:
             return Finding(
@@ -267,6 +326,10 @@ class SecurityAnalyzer(BaseAnalyzer):
                 severity=Severity.HIGH,
                 score_modifier=-25,
                 recommendation="Implement a Content Security Policy. Start with: Content-Security-Policy: default-src 'self'",
+                raw_value="None",
+                expected_value="Content-Security-Policy header",
+                failure_reason="Header is missing entirely.",
+                source=source
             )
 
         # Parse CSP directives
@@ -301,6 +364,10 @@ class SecurityAnalyzer(BaseAnalyzer):
                 score_modifier=-10,
                 data={"directives": directives, "issues": unsafe_issues},
                 recommendation="Remove 'unsafe-inline' and 'unsafe-eval'. Use nonces or hashes instead.",
+                raw_value=csp,
+                expected_value="Safe directives without unsafe-inline or unsafe-eval",
+                failure_reason="; ".join(unsafe_issues),
+                source=source
             )
 
         return Finding(
@@ -311,13 +378,31 @@ class SecurityAnalyzer(BaseAnalyzer):
             severity=Severity.INFO,
             score_modifier=5,
             data={"directives": directives},
+            raw_value=csp,
+            expected_value="Valid CSP header",
+            source=source,
+            failure_reason=None
         )
 
-    def _check_cookies(self, ctx: ScanContext) -> list[Finding]:
+    async def _check_cookies(self, ctx: ScanContext) -> list[Finding]:
         """Check cookie security attributes."""
         findings: list[Finding] = []
 
-        if not ctx.cookies:
+        cookies = ctx.cookies
+        waf_bypassed = False
+
+        if ctx.config.get("enterprise_mode") and ctx.http and cookies:
+            has_insecure = any(not c.get("secure") for c in cookies)
+            if has_insecure:
+                alt_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+                try:
+                    alt_resp = await ctx.http.get(ctx.url, use_cache=False, extra_headers=alt_headers)
+                    cookies = alt_resp.cookies
+                    waf_bypassed = True
+                except Exception:
+                    pass
+
+        if not cookies:
             findings.append(
                 Finding(
                     name="cookies-not-found",
@@ -334,7 +419,7 @@ class SecurityAnalyzer(BaseAnalyzer):
         no_httponly: list[str] = []
         no_samesite: list[str] = []
 
-        for cookie in ctx.cookies:
+        for cookie in cookies:
             name = cookie.get("name", "unknown")
             is_session = any(k in name.lower() for k in ("sess", "login", "auth", "token"))
 
@@ -355,6 +440,9 @@ class SecurityAnalyzer(BaseAnalyzer):
                     severity=Severity.HIGH,
                     score_modifier=-15,
                     recommendation="Set the Secure attribute on all cookies.",
+                    raw_value=f"Cookies missing secure: {', '.join(insecure_cookies)}",
+                    expected_value="All cookies have Secure=True",
+                    failure_reason="Cookies were issued without the secure flag."
                 )
             )
 
@@ -368,6 +456,9 @@ class SecurityAnalyzer(BaseAnalyzer):
                     severity=Severity.HIGH,
                     score_modifier=-20,
                     recommendation="Set the HttpOnly attribute on all session cookies.",
+                    raw_value=f"Session cookies missing httponly: {', '.join(no_httponly)}",
+                    expected_value="All session cookies have HttpOnly=True",
+                    failure_reason="Session cookies can be accessed via JavaScript."
                 )
             )
 
@@ -381,6 +472,9 @@ class SecurityAnalyzer(BaseAnalyzer):
                     severity=Severity.MEDIUM,
                     score_modifier=-5,
                     recommendation="Set SameSite=Lax or SameSite=Strict on all cookies.",
+                    raw_value=f"Cookies missing samesite: {', '.join(no_samesite)}",
+                    expected_value="SameSite=Lax or Strict",
+                    failure_reason="Missing SameSite attribute increases CSRF risk."
                 )
             )
 
@@ -393,6 +487,7 @@ class SecurityAnalyzer(BaseAnalyzer):
                     passed=True,
                     severity=Severity.INFO,
                     score_modifier=5,
+                    source="Alternate User-Agent" if waf_bypassed else "Final Response Headers"
                 )
             )
 
@@ -577,9 +672,29 @@ class SecurityAnalyzer(BaseAnalyzer):
             recommendation="Set X-Frame-Options to DENY or SAMEORIGIN.",
         )
 
-    def _check_x_content_type_options(self, ctx: ScanContext) -> Finding:
+    async def _check_x_content_type_options(self, ctx: ScanContext) -> Finding:
         """Check X-Content-Type-Options header."""
         xcto = ctx.response_headers.get("X-Content-Type-Options", "")
+
+        source = "Final Response Headers"
+
+        # Enterprise Mode WAF bypass
+        if not xcto and ctx.config.get("enterprise_mode") and ctx.http:
+            alt_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            try:
+                alt_resp = await ctx.http.get(ctx.url, use_cache=False, extra_headers=alt_headers)
+                xcto = alt_resp.headers.get("X-Content-Type-Options", "")
+                if xcto:
+                    ctx.config["xcto_waf_bypassed"] = True
+                    source = "Alternate User-Agent Request"
+            except Exception:
+                pass
+
+        # Playwright fallback
+        if not xcto and ctx.playwright_headers:
+            xcto = ctx.playwright_headers.get("x-content-type-options", "")
+            if xcto:
+                source = "Playwright Browser Verification"
 
         if xcto.strip().lower() == "nosniff":
             return Finding(
@@ -589,6 +704,10 @@ class SecurityAnalyzer(BaseAnalyzer):
                 passed=True,
                 severity=Severity.INFO,
                 score_modifier=0,
+                raw_value=xcto,
+                expected_value="nosniff",
+                failure_reason=None,
+                source=source
             )
 
         return Finding(
@@ -599,6 +718,10 @@ class SecurityAnalyzer(BaseAnalyzer):
             severity=Severity.LOW,
             score_modifier=-5,
             recommendation="Add 'X-Content-Type-Options: nosniff' header.",
+            raw_value=xcto if xcto else "None",
+            expected_value="nosniff",
+            failure_reason="Header is missing or not set to 'nosniff'.",
+            source=source
         )
 
     def _check_x_xss_protection(self, ctx: ScanContext) -> Finding:

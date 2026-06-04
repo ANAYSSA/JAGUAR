@@ -96,7 +96,6 @@ class HttpClient:
             ssl=self._ssl_context,
             limit=20,
             limit_per_host=5,
-            enable_cleanup_closed=True,
         )
 
         default_headers = {
@@ -183,6 +182,11 @@ class HttpClient:
         assert self._session is not None
 
         last_error: Exception | None = None
+
+        headers = dict(extra_headers) if extra_headers else {}
+        if getattr(self, "enterprise_mode", False) and "User-Agent" not in headers:
+            headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
         for attempt in range(self._config.max_retries):
             try:
                 start = time.monotonic()
@@ -191,7 +195,7 @@ class HttpClient:
                     url,
                     allow_redirects=self._config.follow_redirects,
                     max_redirects=self._config.max_redirects,
-                    headers=extra_headers,
+                    headers=headers,
                     ssl=self._ssl_context,  # type: ignore
                 ) as resp:
                     body = ""
@@ -208,10 +212,10 @@ class HttpClient:
                     for cookie in self._session.cookie_jar:
                         secure_val = cookie.get("secure", "")
                         is_secure = secure_val is True or (isinstance(secure_val, str) and "secure" in secure_val.lower())
-                        
+
                         httponly_val = cookie.get("httponly", "")
                         is_httponly = httponly_val is True or (isinstance(httponly_val, str) and httponly_val != "")
-                        
+
                         cookies.append(
                             {
                                 "name": cookie.key,

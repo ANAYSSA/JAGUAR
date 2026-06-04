@@ -23,6 +23,8 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+import aiohttp
+
 from jaguar.core.http_client import HttpClient, HttpClientConfig
 from jaguar.core.models import (
     AnalyzerCategory,
@@ -77,13 +79,17 @@ class ScanEngine:
     def __init__(
         self,
         *,
-        http_config: HttpClientConfig | None = None,
-        use_browser: bool = True,
         config: dict[str, Any] | None = None,
+        use_browser: bool = True,
+        enterprise_mode: bool = False,
     ) -> None:
-        self._http_config = http_config or HttpClientConfig()
-        self._use_browser = use_browser
-        self._config = config or {}
+        self.config = config or {}
+        self.use_browser = use_browser
+        self.enterprise_mode = enterprise_mode
+        self._http_config = HttpClientConfig(
+            timeout=aiohttp.ClientTimeout(total=45),
+            max_retries=3 if not enterprise_mode else 5,
+        )
         self._http: HttpClient | None = None
         self._browser_manager: Any = None  # Lazy import to avoid hard dep
 
@@ -123,9 +129,12 @@ class ScanEngine:
             # Initialize HTTP client
             async with HttpClient(self._http_config) as http:
                 self._http = http
+                if self.enterprise_mode:
+                    http.enterprise_mode = True  # type: ignore
 
                 # Phase 1: Initial retrieval
                 context = await self._build_context(normalized, hostname, base_url, http)
+                context.config["enterprise_mode"] = self.enterprise_mode
 
                 # Phase 2: Run lifecycle hooks (pre_scan)
                 for hook in registry.hooks:
@@ -136,7 +145,7 @@ class ScanEngine:
 
                 # Phase 3: Optionally capture screenshots
                 needs_browser = self._analyzers_need_browser(analyzer_names)
-                if self._use_browser and needs_browser:
+                if self.use_browser and needs_browser:
                     context = await self._setup_browser(context)
 
                 # Phase 4: Dispatch analyzers concurrently
@@ -163,8 +172,20 @@ class ScanEngine:
                         result.analyzer_results["ai_detect"]
                     )
 
-                # Phase 7: Screenshots
+                # Phase 7: Transfer state to result
                 result.screenshots = context.screenshots
+                result.headers = context.response_headers
+                result.cookies = context.cookies
+                result.redirect_chain = context.redirect_chain
+
+                # Apply confidence and mode
+                confidence = 100.0
+                if context.config.get("hsts_waf_bypassed"):
+                    confidence -= 5.0
+                if context.config.get("csp_waf_bypassed"):
+                    confidence -= 5.0
+                result.confidence = confidence
+                result.enterprise_mode = self.enterprise_mode
 
                 # Phase 8: Compute overall score
                 category_scores: dict[AnalyzerCategory, int] = {}
@@ -177,6 +198,7 @@ class ScanEngine:
 
                 if category_scores:
                     result.overall_score = compute_overall_score(category_scores)
+                    result.overall_score.confidence = confidence
 
                 # Phase 9: Generate recommendations
                 result.recommendations = generate_recommendations(result)
@@ -245,7 +267,9 @@ class ScanEngine:
             tls_info=response.tls_info,
             cookies=response.cookies,
             page_resources=resources,
-            config=self._config,
+            browser_available=self.use_browser,
+            config=self.config,
+            http=http,
         )
 
     def _discover_resources(self, html: str, base_url: str) -> list[dict[str, Any]]:
@@ -309,6 +333,16 @@ class ScanEngine:
             await self._browser_manager.start()
             context.browser_available = True
 
+            # Capture headers
+            try:
+                page = await self._browser_manager.new_page(viewport="desktop")
+                response = await self._browser_manager.navigate_and_wait(page, context.url)
+                if response:
+                    context.playwright_headers = {k.lower(): v for k, v in response.headers.items()}
+                await page.close()
+            except Exception as e:
+                logger.warning("Failed to capture Playwright headers: %s", e)
+
             # Capture screenshots (Requirement #5)
             from jaguar.browser.screenshots import capture_screenshot_gallery
 
@@ -354,6 +388,13 @@ class ScanEngine:
                 analyzer_results.append(r)
 
         return analyzer_results
+
+    async def close(self) -> None:
+        """Close HTTP client and browser resources."""
+        if self._http:
+            await self._http.close()
+        if self._browser_manager:
+            await self._browser_manager.close()
 
     async def _run_single_analyzer(
         self,

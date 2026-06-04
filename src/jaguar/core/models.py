@@ -111,6 +111,10 @@ class Finding(BaseModel):
     )
     data: dict[str, Any] = Field(default_factory=dict, description="Raw data backing this finding")
     recommendation: str = Field(default="", description="Actionable fix suggestion")
+    raw_value: str | None = Field(default=None, description="Raw value received")
+    expected_value: str | None = Field(default=None, description="Expected value")
+    failure_reason: str | None = Field(default=None, description="Why it failed")
+    source: str = Field(default="Final Response Headers", description="Where this was checked")
 
 
 class ScoreExplanation(BaseModel):
@@ -129,6 +133,8 @@ class ScoreExplanation(BaseModel):
     improvements: list[str] = Field(
         default_factory=list, description="Actions that would raise the score"
     )
+    breakdown: dict[str, int] = Field(default_factory=dict, description="Detailed score modifiers")
+    confidence: float = Field(default=100.0, ge=0.0, le=100.0)
 
 
 class Recommendation(BaseModel):
@@ -250,12 +256,17 @@ class ScanResult(BaseModel):
     analyzer_results: dict[str, AnalyzerResult] = Field(default_factory=dict)
     overall_score: ScoreExplanation | None = None
     screenshots: list[Screenshot] = Field(default_factory=list)
+    headers: dict[str, str] = Field(default_factory=dict)
+    cookies: list[dict[str, Any]] = Field(default_factory=list)
+    redirect_chain: list[str] = Field(default_factory=list)
     tech_stack: list[TechDetection] = Field(default_factory=list)
     ai_detection: AIDetectionResult | None = None
     recommendations: list[Recommendation] = Field(default_factory=list)
     executive_summary: str = ""
     errors: list[str] = Field(default_factory=list)
-    jaguar_version: str = "1.0.0"
+    jaguar_version: str = "1.0.1"
+    confidence: float = 100.0
+    enterprise_mode: bool = False
 
     def get_analyzer_score(self, category: AnalyzerCategory) -> int | None:
         """Get score for a specific analyzer category."""
@@ -376,6 +387,7 @@ class ScanContext(BaseModel):
     base_url: str
     response_status: int = 0
     response_headers: dict[str, str] = Field(default_factory=dict)
+    playwright_headers: dict[str, str] = Field(default_factory=dict)
     response_body: str = ""
     final_url: str = ""
     redirect_chain: list[str] = Field(default_factory=list)
@@ -387,3 +399,4 @@ class ScanContext(BaseModel):
     screenshots: list[Screenshot] = Field(default_factory=list)
     browser_available: bool = False
     config: dict[str, Any] = Field(default_factory=dict)
+    http: Any = None
