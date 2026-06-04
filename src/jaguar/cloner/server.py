@@ -34,31 +34,67 @@ mimetypes.add_type("image/webp", ".webp")
 mimetypes.add_type("image/avif", ".avif")
 
 
+def _is_jaguar_redirect(path: Path) -> bool:
+    """Check if an HTML file is a JAGUAR-generated redirect stub."""
+    try:
+        content = path.read_text("utf-8", errors="replace")
+        return 'http-equiv="refresh"' in content and len(content) < 500
+    except Exception:
+        return False
+
+
+def _entry_score(path: Path, root: Path) -> tuple[int, int]:
+    """Score an entry point candidate. Higher is better.
+    Returns (depth_score, size) where depth_score favors shallower files."""
+    rel = path.relative_to(root)
+    depth = len(rel.parts)
+    # Shallower files score higher (invert depth); size is tiebreaker
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    return (-depth, size)
+
+
 def detect_entry_point(directory: str) -> str | None:
-    """Detect the main entry page of a cloned website by size."""
+    """Detect the main entry page of a cloned website.
+    
+    Priority:
+    1. Root index.html if it's a real page (not a JAGUAR redirect stub)
+    2. Shallowest index.html / index.php / home.html that is a real page
+    3. Any HTML/PHP file, shallowest + largest wins
+    """
     root = Path(directory)
 
-    # Search for known primary entry files recursively
-    candidates = []
-    for name in ["index.html", "home.html", "default.html", "main.html", "app.html"]:
-        candidates.extend(root.rglob(name))
-        
+    # Priority 1: root index.html if real
+    root_index = root / "index.html"
+    if root_index.exists() and not _is_jaguar_redirect(root_index):
+        return "index.html"
+
+    # Priority 2: search for known entry filenames (include .php for Moodle/WordPress)
+    entry_names = ["index.html", "index.php", "home.html", "default.html", "main.html", "app.html"]
+    candidates: list[Path] = []
+    for name in entry_names:
+        for p in root.rglob(name):
+            if not _is_jaguar_redirect(p):
+                candidates.append(p)
+
     if candidates:
-        # Pick the one with the largest file size
-        best = max(candidates, key=lambda p: p.stat().st_size)
+        best = max(candidates, key=lambda p: _entry_score(p, root))
         return str(best.relative_to(root)).replace("\\", "/")
 
-    # Fallback to ANY HTML file
-    html_files = list(root.rglob("*.html"))
-    if html_files:
-        best = max(html_files, key=lambda p: p.stat().st_size)
+    # Priority 3: any HTML or PHP file
+    all_pages = list(root.rglob("*.html")) + list(root.rglob("*.php"))
+    all_pages = [p for p in all_pages if not _is_jaguar_redirect(p)]
+    if all_pages:
+        best = max(all_pages, key=lambda p: _entry_score(p, root))
         return str(best.relative_to(root)).replace("\\", "/")
 
     return None
 
 
 def ensure_root_index(directory: str) -> str | None:
-    """Create a root index.html redirect if one doesn't exist."""
+    """Create a root index.html redirect if one doesn't exist or is a stale redirect."""
     root = Path(directory)
     root_index = root / "index.html"
 
@@ -66,11 +102,20 @@ def ensure_root_index(directory: str) -> str | None:
     
     if not entry and not root_index.exists():
         raise ValueError(f"No valid HTML entry point found in {directory}. The directory might be empty or not a cloned website.")
-        
-    if root_index.exists() and not entry:
+    
+    if not entry:
         return None
-    if entry:
-        html = f"""<!DOCTYPE html>
+        
+    # If entry IS the root index.html, no redirect needed
+    if entry == "index.html":
+        return entry
+    
+    # If root index.html is a real page (not a redirect), don't overwrite it
+    if root_index.exists() and not _is_jaguar_redirect(root_index):
+        return entry
+    
+    # Create/update redirect stub at root index.html pointing to actual entry
+    html = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -82,11 +127,9 @@ def ensure_root_index(directory: str) -> str | None:
 </body>
 </html>
 """
-        root_index.write_text(html, encoding="utf-8")
-        logger.info("Created redirect: index.html → %s", entry)
-        return entry
-
-    return None
+    root_index.write_text(html, encoding="utf-8")
+    logger.info("Created redirect: index.html → %s", entry)
+    return entry
 
 
 class SPARequestHandler(SimpleHTTPRequestHandler):
@@ -157,6 +200,37 @@ class SPARequestHandler(SimpleHTTPRequestHandler):
 
         super().send_error(code, message, explain)
 
+    def list_directory(self, path: str) -> None:
+        """Override directory listing to prevent leaking user files. Return offline placeholder instead."""
+        print(f"\033[93m[403] Directory Listing Blocked:\033[0m {self.path}")
+        offline_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Directory Listing Blocked - JAGUAR</title>
+    <style>
+        body {{ font-family: system-ui, -apple-system, sans-serif; text-align: center; padding: 100px 20px; color: #333; }}
+        h1 {{ color: #e53e3e; }}
+        .box {{ max-width: 600px; margin: 0 auto; background: #f7fafc; padding: 40px; border-radius: 8px; border: 1px solid #e2e8f0; }}
+        code {{ background: #edf2f7; padding: 2px 6px; border-radius: 4px; }}
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h1>Directory Access Blocked</h1>
+        <p>JAGUAR explicitly blocks directory listings to protect local files.</p>
+        <p><code>{self.path}</code></p>
+        <a href="/">Return to Home</a>
+    </div>
+</body>
+</html>"""
+        self.send_response(403)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(offline_html.encode('utf-8'))))
+        self.end_headers()
+        self.wfile.write(offline_html.encode('utf-8'))
+        return None
+
     def log_message(self, format: str, *args: Any) -> None:
         # Suppress standard HTTP logs unless it's an error to keep console clean during SPA testing
         pass
@@ -217,20 +291,20 @@ class CloneServer:
 
         # Ensure directory is actually a valid clone (must contain some HTML)
         root = Path(self.directory)
-        if not (root / "index.html").exists() and not list(root.rglob("*.html")):
-            raise ValueError(f"Refusing to serve {self.directory}: Not a valid JAGUAR clone (no HTML files found). This prevents accidental exposure of user directories.")
+        if not (root / "index.html").exists() and not list(root.rglob("*.html")) and not list(root.rglob("*.php")):
+            raise ValueError(f"Refusing to serve {self.directory}: Not a valid JAGUAR clone (no HTML or PHP files found). This prevents accidental exposure of user directories.")
 
         # Ensure entry point exists
         entry = ensure_root_index(self.directory)
         if entry:
             logger.info("Auto-detected entry point: %s", entry)
 
-        # Ensure we change to the right directory for the handler
-        original_dir = os.getcwd()
-        os.chdir(self.directory)
+        import functools
+        # Bind the directory to the handler class so SimpleHTTPRequestHandler
+        # uses it as self.directory (instead of os.getcwd())
+        handler = functools.partial(SPARequestHandler, directory=self.directory)
 
         try:
-            handler = SPARequestHandler
             # allow_reuse_address prevents "Address already in use" errors
             TCPServer.allow_reuse_address = True
 
@@ -255,8 +329,8 @@ class CloneServer:
             logger.info("Serving %s at %s", self.directory, url)
             return url
 
-        finally:
-            os.chdir(original_dir)
+        except Exception:
+            raise
 
     def stop(self) -> None:
         """Stop the background server."""

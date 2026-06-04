@@ -174,17 +174,29 @@ class CloneValidator:
         
         report = CloneReport()
 
+        from jaguar.cloner.server import detect_entry_point
+        
         report.html.total = 1
-        index_path = self.clone_dir / "index.html"
-        if index_path.exists():
+        entry = detect_entry_point(str(self.clone_dir))
+        entry_path = None
+        
+        if entry:
             report.html.resolved = 1
+            entry_path = self.clone_dir / entry
         else:
-            report.html.missing.append("index.html")
+            report.html.missing.append("index.html (or any valid entry point)")
 
         api_endpoints = ["/api/", "/graphql", "/auth/", "/login"]
         frontend_only_detected = False
+        
+        # Scan both .html AND .php files (Moodle uses .php pages with HTML content)
+        # Filter to actual files only — Moodle stores data in dirs named like 'styles.php/'
+        html_files = set(p for p in self.clone_dir.rglob("*.html") if p.is_file())
+        html_files.update(p for p in self.clone_dir.rglob("*.php") if p.is_file())
+        if entry_path and entry_path.exists() and entry_path.is_file():
+            html_files.add(entry_path)
 
-        for html_file in self.clone_dir.rglob("*.html"):
+        for html_file in html_files:
             current_stage = "HTML/Routes"
             if timeout > 0 and (time.time() - start_time) > timeout:
                 logger.warning("Validation timed out at stage '%s' after %.1fs, continuing...", current_stage, timeout)
