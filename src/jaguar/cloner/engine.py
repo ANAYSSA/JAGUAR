@@ -37,6 +37,7 @@ class ClonerEngine:
         max_pages: int = 50,
         concurrency: int = 5,
         render_spa: bool = False,
+        verify: bool = False,
         output_dir: str = "./jaguar-clones",
         config: dict[str, Any] | None = None,
     ):
@@ -44,8 +45,11 @@ class ClonerEngine:
         self.max_pages = max_pages
         self.concurrency = concurrency
         self.render_spa = render_spa
+        self.verify = verify
         self.output_dir = output_dir
         self.config = config or {}
+        self.clone_report: Any = None
+        self.visual_result: Any = None
 
         self._visited: set[str] = set()
         self._queued: set[str] = set()
@@ -141,7 +145,70 @@ class ClonerEngine:
             len(self._visited),
             len(self._assets_visited),
         )
+
+        # Post-clone phases
+        await self._post_clone(target_dir)
+
         return str(target_dir.absolute())
+
+    async def _post_clone(self, target_dir: Path) -> None:
+        """Run CSS resolution, rebuild, validation, and optional visual compare."""
+        from jaguar.cloner.css_resolver import CSSResolver
+        from jaguar.cloner.rebuilder import Rebuilder
+        from jaguar.cloner.validator import CloneValidator
+
+        # Phase A: CSS dependency resolution
+        logger.info("Phase: CSS dependency resolution")
+        try:
+            http_config = HttpClientConfig(
+                max_retries=2,
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            async with HttpClient(http_config) as http:
+                resolver = CSSResolver(http._session, self.base_url, target_dir)
+                css_result = await resolver.resolve_all()
+                logger.info(
+                    "CSS resolved: %d deps, %d failed, %d fonts",
+                    css_result.total_resolved,
+                    css_result.total_failed,
+                    len(css_result.fonts_downloaded),
+                )
+        except Exception as e:
+            logger.warning("CSS resolution failed: %s", e)
+
+        # Phase B: Rebuild (fix paths, entry point, manifests)
+        logger.info("Phase: Rebuild")
+        try:
+            rebuilder = Rebuilder(target_dir, self.base_url)
+            rebuild_summary = rebuilder.rebuild()
+            logger.info("Rebuild summary: %s", rebuild_summary)
+        except Exception as e:
+            logger.warning("Rebuild failed: %s", e)
+
+        # Phase C: Validate clone health
+        logger.info("Phase: Validation")
+        try:
+            validator = CloneValidator(target_dir)
+            self.clone_report = validator.validate()
+
+            # Write CLONE_REPORT.md
+            report_path = target_dir / "CLONE_REPORT.md"
+            report_path.write_text(self.clone_report.to_markdown(), encoding="utf-8")
+            logger.info("Clone health: %.1f%%", self.clone_report.overall_health)
+        except Exception as e:
+            logger.warning("Validation failed: %s", e)
+
+        # Phase D: Visual comparison (if --verify)
+        if self.verify:
+            logger.info("Phase: Visual comparison")
+            try:
+                from jaguar.cloner.visual_compare import VisualCompare
+
+                comparator = VisualCompare(target_dir)
+                self.visual_result = await comparator.compare(self.base_url)
+                logger.info("Visual accuracy: %.1f%%", self.visual_result.accuracy)
+            except Exception as e:
+                logger.warning("Visual comparison failed: %s", e)
 
     async def _page_worker(self, base_dir: Path) -> None:
         """Worker that processes HTML pages."""
