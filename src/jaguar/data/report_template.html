@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JAGUAR Scan: {{ result.hostname }}</title>
+    <style>
+        :root {
+            --primary: #10b981;
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --text: #f8fafc;
+            --text-dim: #94a3b8;
+            --border: #334155;
+            
+            --critical: #ef4444;
+            --high: #f97316;
+            --medium: #f59e0b;
+            --low: #3b82f6;
+            --info: #64748b;
+            --pass: #10b981;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 0;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        header {
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 2rem;
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+        }
+        
+        h1 { margin: 0 0 0.5rem 0; font-size: 2.5rem; }
+        
+        .score-card {
+            background: var(--surface);
+            border-radius: 1rem;
+            padding: 2rem;
+            text-align: center;
+            border: 1px solid var(--border);
+        }
+        
+        .grade {
+            font-size: 4rem;
+            font-weight: 800;
+            line-height: 1;
+            margin-bottom: 0.5rem;
+        }
+        
+        .grade-A { color: var(--pass); }
+        .grade-B { color: var(--low); }
+        .grade-C { color: var(--medium); }
+        .grade-D { color: var(--high); }
+        .grade-F { color: var(--critical); }
+        
+        .section {
+            background: var(--surface);
+            border-radius: 1rem;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            border: 1px solid var(--border);
+        }
+        
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th, td {
+            padding: 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        th { color: var(--text-dim); font-weight: 500; }
+        
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 0.875rem;
+            font-weight: 600;
+        }
+        
+        .badge-critical { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
+        .badge-high { background: rgba(249, 115, 22, 0.2); color: #fdba74; }
+        .badge-medium { background: rgba(245, 158, 11, 0.2); color: #fcd34d; }
+        .badge-low { background: rgba(59, 130, 246, 0.2); color: #93c5fd; }
+        
+        .finding {
+            padding: 1rem;
+            border-radius: 0.5rem;
+            background: rgba(0,0,0,0.2);
+            margin-bottom: 1rem;
+            border-left: 4px solid var(--info);
+        }
+        .finding.fail { border-left-color: var(--critical); }
+        .finding.pass { border-left-color: var(--pass); }
+        
+        .finding h4 { margin: 0 0 0.5rem 0; }
+        .finding p { margin: 0; color: var(--text-dim); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1>{{ result.hostname }}</h1>
+                <p style="color: var(--text-dim); margin: 0;">
+                    <a href="{{ result.url }}" style="color: var(--low);">{{ result.url }}</a><br>
+                    Scanned on {{ result.scan_started_at[:10] }} in {{ (result.duration_ms / 1000)|round(1) }}s
+                </p>
+            </div>
+            {% if result.overall_score %}
+            <div class="score-card">
+                <div class="grade grade-{{ result.overall_score.grade[0] }}">{{ result.overall_score.grade }}</div>
+                <div>Score: {{ result.overall_score.score }}/100</div>
+            </div>
+            {% endif %}
+        </header>
+
+        {% if result.executive_summary %}
+        <div class="section">
+            <h2>Executive Summary</h2>
+            <p>{{ result.executive_summary }}</p>
+        </div>
+        {% endif %}
+
+        <div class="grid-2">
+            <div class="section">
+                <h2>Category Scores</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Category</th>
+                            <th>Score</th>
+                            <th>Grade</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for name, ar in result.analyzer_results.items()|sort %}
+                        <tr>
+                            <td style="text-transform: capitalize;">{{ name.replace('_', ' ') }}</td>
+                            <td>{{ ar.score_explanation.score }}</td>
+                            <td><span class="grade-{{ ar.score_explanation.grade[0] }} font-bold">{{ ar.score_explanation.grade }}</span></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="section">
+                <h2>Top Recommendations</h2>
+                {% if result.recommendations %}
+                    {% for rec in result.recommendations[:5] %}
+                    <div style="margin-bottom: 1.5rem;">
+                        <h4 style="margin: 0 0 0.25rem 0;">
+                            <span class="badge badge-{{ rec.priority }}">{{ rec.priority|upper }}</span> 
+                            {{ rec.what }}
+                        </h4>
+                        <p style="margin: 0; color: var(--text-dim); font-size: 0.9rem;">
+                            <strong>Why:</strong> {{ rec.why }}<br>
+                            <strong>Fix:</strong> {{ rec.how }}
+                        </p>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <p>No critical recommendations.</p>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if result.tech_stack %}
+        <div class="section">
+            <h2>Detected Technology Stack</h2>
+            <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                {% for tech in result.tech_stack %}
+                <span style="background: rgba(255,255,255,0.1); padding: 0.5rem 1rem; border-radius: 2rem; font-size: 0.9rem;">
+                    <strong style="color: var(--primary);">{{ tech.name }}</strong>
+                    {% if tech.version %}<span style="color: var(--text-dim);">- v{{ tech.version }}</span>{% endif %}
+                </span>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <h2>Detailed Findings</h2>
+        {% for name, ar in result.analyzer_results.items()|sort %}
+        <div class="section">
+            <h3 style="text-transform: capitalize; margin-top: 0;">{{ name.replace('_', ' ') }}</h3>
+            
+            {% set failed = ar.findings | selectattr("passed", "equalto", false) | list %}
+            {% if failed %}
+                <h4 style="color: #fca5a5;">Issues to Fix</h4>
+                {% for f in failed %}
+                <div class="finding fail">
+                    <h4>{{ f.title }} <span class="badge badge-{{ f.severity }}">{{ f.severity|upper }}</span></h4>
+                    <p>{{ f.description }}</p>
+                    {% if f.recommendation %}<p style="margin-top: 0.5rem; color: var(--text);">💡 {{ f.recommendation }}</p>{% endif %}
+                </div>
+                {% endfor %}
+            {% endif %}
+
+            {% set passed = ar.findings | selectattr("passed", "equalto", true) | list %}
+            {% if passed %}
+                <h4 style="color: #86efac; margin-top: 2rem;">Passed Checks</h4>
+                {% for f in passed[:5] %}
+                <div class="finding pass">
+                    <h4>{{ f.title }}</h4>
+                    <p>{{ f.description }}</p>
+                </div>
+                {% endfor %}
+                {% if passed|length > 5 %}
+                <p style="color: var(--text-dim); font-style: italic;">...and {{ passed|length - 5 }} more passing checks.</p>
+                {% endif %}
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</body>
+</html>
