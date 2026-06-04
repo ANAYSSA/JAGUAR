@@ -54,15 +54,15 @@ console = Console()
 def display_banner() -> None:
     """Print the JAGUAR premium ASCII banner."""
     banner = """
-[bold cyan]      ██████████████████████████████████████████████████[/bold cyan]
-[bold cyan]      █[/bold cyan] [bold white]██╗ █████╗  ██████╗ ██╗   ██╗ █████╗ ██████╗[/bold white] [bold cyan]█[/bold cyan]
-[bold cyan]      █[/bold cyan] [bold white]██║██╔══██╗██╔════╝ ██║   ██║██╔══██╗██╔══██╗[/bold white] [bold cyan]█[/bold cyan]
-[bold cyan]      █[/bold cyan] [bold white]██║███████║██║  ███╗██║   ██║███████║██████╔╝[/bold white] [bold cyan]█[/bold cyan]
-[bold cyan]      █[/bold cyan] [bold white]██║██╔══██║██║   ██║██║   ██║██╔══██║██╔══██╗[/bold white] [bold cyan]█[/bold cyan]
-[bold cyan]      █[/bold cyan] [bold white]██║██║  ██║╚██████╔╝╚██████╔╝██║  ██║██║  ██║[/bold white] [bold cyan]█[/bold cyan]
-[bold cyan]      █[/bold cyan] [bold white]╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝[/bold white] [bold cyan]█[/bold cyan]
-[bold cyan]      ██████████████████████████████████████████████████[/bold cyan]
-    """
+[bold cyan]██████████████████████████████████████████████████[/bold cyan]
+[bold cyan]█[/bold cyan] [bold white]██╗ █████╗  ██████╗ ██╗   ██╗ █████╗ ██████╗[/bold white] [bold cyan]█[/bold cyan]
+[bold cyan]█[/bold cyan] [bold white]██║██╔══██╗██╔════╝ ██║   ██║██╔══██╗██╔══██╗[/bold white] [bold cyan]█[/bold cyan]
+[bold cyan]█[/bold cyan] [bold white]██║███████║██║  ███╗██║   ██║███████║██████╔╝[/bold white] [bold cyan]█[/bold cyan]
+[bold cyan]█[/bold cyan] [bold white]██║██╔══██║██║   ██║██║   ██║██╔══██║██╔══██╗[/bold white] [bold cyan]█[/bold cyan]
+[bold cyan]█[/bold cyan] [bold white]██║██║  ██║╚██████╔╝╚██████╔╝██║  ██║██║  ██║[/bold white] [bold cyan]█[/bold cyan]
+[bold cyan]█[/bold cyan] [bold white]╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝[/bold white] [bold cyan]█[/bold cyan]
+[bold cyan]██████████████████████████████████████████████████[/bold cyan]
+"""
     console.print(banner, justify="center")
 
     version_text = Text(f"JAGUAR v{__version__} by anayssa", style="bold magenta", justify="center")
@@ -193,28 +193,38 @@ def clone(url: str, depth: int, pages: int, spa: bool, serve: bool, verify: bool
 
         engine = ClonerEngine(max_depth=depth, max_pages=pages, render_spa=spa, verify=verify, output_dir=clone_dir)
 
+        import time
+        start_time = time.time()
         output_dir = await engine.clone(url)
+        elapsed = time.time() - start_time
+        mins, secs = divmod(int(elapsed), 60)
+        hours, mins = divmod(mins, 60)
+        elapsed_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
+
         import os
         click.echo(f"\nClone successful.\n\nFiles saved to:\n{os.path.abspath(output_dir)}\n")
 
-        # Display clone health report
         if engine.clone_report:
             report = engine.clone_report
-            click.secho(f"Clone Health: {report.overall_health}%", fg="green" if report.overall_health >= 90 else "yellow")
-            click.echo(f"  CSS: {report.css.percentage}%  JS: {report.js.percentage}%  Images: {report.images.percentage}%")
-            click.echo(f"  Fonts: {report.fonts.percentage}%  SVG: {report.svg.percentage}%  Media: {report.media.percentage}%")
-            if report.total_missing > 0:
-                click.secho(f"  Missing Resources: {report.total_missing}", fg="yellow")
+            click.echo(f"Processed URLs: {report.html.total}")
+
+            downloaded = sum(
+                c.resolved for c in [report.css, report.js, report.images, report.fonts, report.svg, report.manifest, report.media]
+            )
+            click.echo(f"Assets Downloaded: {downloaded}")
+            click.echo(f"Missing Assets: {report.total_missing}")
+
+            if engine.visual_result and engine.visual_result.accuracy >= 0:
+                click.echo(f"Visual Accuracy: {engine.visual_result.accuracy}%")
+            else:
+                click.echo("Visual Accuracy: N/A")
+
+            click.echo(f"Clone Health: {report.overall_health}%")
+            click.echo(f"Elapsed Time: {elapsed_str}")
+
             if report.is_spa:
                 click.secho("\n[WARNING] SPA detected (React/Vue/Next/Angular).", fg="yellow")
                 click.secho("This clone may require its original backend APIs to function fully offline.", fg="yellow")
-            click.echo("")
-
-        # Display visual accuracy if --verify
-        if engine.visual_result and engine.visual_result.accuracy >= 0:
-            vr = engine.visual_result
-            click.secho(f"Visual Accuracy: {vr.accuracy}%", fg="green" if vr.accuracy >= 90 else "yellow")
-            click.echo(f"  Different Pixels: {vr.diff_pixels}")
             click.echo("")
 
         if not serve:
@@ -255,7 +265,14 @@ def serve(path: str, port: int = 8080) -> None:
     clone_dir = Path(cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones"))
 
     target_path = Path(path)
-    if not target_path.exists() and (clone_dir / path).exists():
+    if path.lower() == "latest":
+        dirs = [d for d in clone_dir.iterdir() if d.is_dir()]
+        if not dirs:
+            click.echo("Error: No clones found in clone directory.")
+            return
+        target_path = max(dirs, key=os.path.getmtime)
+        click.echo(f"Resolved 'latest' to: {target_path.name}")
+    elif not target_path.exists() and (clone_dir / path).exists():
         target_path = clone_dir / path
     elif not target_path.exists():
         click.echo(f"Error: Path {path} does not exist.")

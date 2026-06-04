@@ -77,6 +77,7 @@ class BrowserManager:
         viewport: str = "desktop",
         *,
         user_agent: str | None = None,
+        locale: str | None = None,
     ) -> Any:
         """
         Create a new browser page with the specified viewport.
@@ -84,6 +85,7 @@ class BrowserManager:
         Args:
             viewport: One of 'desktop', 'tablet', 'mobile'
             user_agent: Optional custom user agent
+            locale: Optional locale to set for the context
 
         Returns:
             Playwright Page object
@@ -101,6 +103,8 @@ class BrowserManager:
         }
         if user_agent:
             context_options["user_agent"] = user_agent
+        if locale:
+            context_options["locale"] = locale
 
         context = await self._browser.new_context(**context_options)
         page = await context.new_page()

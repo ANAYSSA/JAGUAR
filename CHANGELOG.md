@@ -1,3 +1,16 @@
+## [1.0.7] - 2026-06-04
+### Added
+- Language Preservation: Accurately detects and passes the original site locale (`html lang`, `Content-Language` header, or OS default) to Playwright and clone reports to prevent unexpected translation issues.
+- `jaguar serve` command now accepts `latest` as an argument to serve the most recently created clone, and automatically resolves `domain.com` from inside the clone directory.
+- Clone Validation expanded to report `Missing Assets / Broken Links / 404s` with full path detection.
+- Asset Rewrite Engine automatically finds and repairs broken paths by searching the clone directory for misplaced CSS/JS/images.
+- CLI banner centered correctly and success output enhanced with exact Processing, Missing Assets, and Elapsed Time stats.
+
+### Fixed
+- Fixed an issue where the clone engine would freeze for ~15 seconds after completion by introducing queue drains and strict timeouts upon reaching `max_pages`.
+- Fixed Clone Health scoring: A missing `index.html` (homepage) now correctly forces Clone Health to `0%`. Missing linked assets accurately penalize overall health.
+- Fixed `url(...)` path handling for inline styles and CSS files to correctly generate relative, offline-compatible paths.
+
 ## [1.0.6] - 2026-06-04
 ### Added
 - Configurable clone storage directory via `jaguar config set clone_dir` or `JAGUAR_CLONE_DIR`.

@@ -22,7 +22,7 @@ class SPARenderer:
         """Initialize with a BrowserManager instance."""
         self.browser = browser_manager
 
-    async def render_to_static_html(self, url: str) -> str:
+    async def render_to_static_html(self, url: str, locale: str | None = None) -> str:
         """
         Navigate to URL, wait for JS framework to render, and return static HTML.
         """
@@ -31,7 +31,7 @@ class SPARenderer:
 
         page = None
         try:
-            page = await self.browser.new_page()
+            page = await self.browser.new_page(locale=locale)
 
             # Navigate and wait for network to be idle (JS loaded)
             await self.browser.navigate_and_wait(page, url, wait_until="networkidle")

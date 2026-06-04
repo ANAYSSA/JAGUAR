@@ -39,29 +39,47 @@ class CloneReport:
     svg: CategoryHealth = field(default_factory=CategoryHealth)
     manifest: CategoryHealth = field(default_factory=CategoryHealth)
     media: CategoryHealth = field(default_factory=CategoryHealth)
+    html: CategoryHealth = field(default_factory=CategoryHealth)
+    links: CategoryHealth = field(default_factory=CategoryHealth)
 
     entry_point: str | None = None
     is_spa: bool = False
 
+    site_language: str = "Unknown"
+    language_source: str = "Unknown"
+    visual_accuracy: float | None = None
+
     @property
     def overall_health(self) -> float:
-        cats = [self.css, self.js, self.images, self.fonts, self.svg, self.manifest, self.media]
+        cats = [self.html, self.css, self.js, self.images, self.fonts, self.svg, self.manifest, self.media, self.links]
         non_empty = [c for c in cats if c.total > 0]
         if not non_empty:
             return 100.0
+        # If HTML has 0 resolved but some total, it means index.html or main pages failed!
+        if self.html.total > 0 and self.html.resolved == 0:
+            return 0.0
         return round(sum((c.resolved / c.total) * 100 for c in non_empty) / len(non_empty), 1)
 
     @property
     def total_missing(self) -> int:
         return sum(
             len(c.missing)
-            for c in [self.css, self.js, self.images, self.fonts, self.svg, self.manifest, self.media]
+            for c in [self.html, self.css, self.js, self.images, self.fonts, self.svg, self.manifest, self.media, self.links]
         )
 
     def to_markdown(self) -> str:
-        lines = []
+        lines = [
+            "# Clone Report",
+            "",
+            f"**Overall Health:** {self.overall_health}%",
+            f"**Site Language:** {self.site_language}",
+            f"**Language Source:** {self.language_source}",
+            f"**Visual Accuracy:** {f'{self.visual_accuracy}%' if self.visual_accuracy else 'N/A'}",
+            "",
+        ]
 
         for name, cat in [
+            ("HTML", self.html),
             ("CSS", self.css),
             ("JS", self.js),
             ("Images", self.images),
@@ -69,8 +87,9 @@ class CloneReport:
             ("SVG", self.svg),
             ("Manifest", self.manifest),
             ("Media", self.media),
+            ("Links", self.links),
         ]:
-            if cat.total > 0 or name in ["CSS", "JS", "Images", "Fonts"]:
+            if cat.total > 0 or name in ["HTML", "CSS", "JS", "Images", "Fonts"]:
                 lines.append(f"{name}:")
                 if cat.total == 0:
                     lines.append("0/0 OK")
@@ -80,12 +99,13 @@ class CloneReport:
                     lines.append(f"{cat.resolved}/{cat.total} OK")
                 lines.append("")
 
-        lines.append("Missing:")
+        lines.append("Missing Assets / Broken Links / 404s:")
         lines.append(str(self.total_missing))
         lines.append("")
 
         all_missing = []
         for name, cat in [
+            ("HTML", self.html),
             ("CSS", self.css),
             ("JS", self.js),
             ("Images", self.images),
@@ -93,6 +113,7 @@ class CloneReport:
             ("SVG", self.svg),
             ("Manifest", self.manifest),
             ("Media", self.media),
+            ("Links", self.links),
         ]:
             for m in cat.missing:
                 all_missing.append(f"- [{name}] {m}")
@@ -113,10 +134,29 @@ class CloneValidator:
     def validate(self) -> CloneReport:
         report = CloneReport()
 
+        report.html.total = 1
+        index_path = self.clone_dir / "index.html"
+        if index_path.exists():
+            report.html.resolved = 1
+        else:
+            report.html.missing.append("index.html")
+
+        api_endpoints = ["/api/", "/graphql", "/auth/", "/login"]
+        frontend_only_detected = False
+
         for html_file in self.clone_dir.rglob("*.html"):
             try:
                 content = html_file.read_text(encoding="utf-8", errors="replace")
                 soup = BeautifulSoup(content, "lxml")
+
+                # Check internal links and frontend-only triggers
+                for a in soup.find_all("a", href=True):
+                    href = a.get("href")
+                    if any(ep in href for ep in api_endpoints):
+                        frontend_only_detected = True
+                    if href.startswith(("http", "mailto:", "tel:", "javascript:", "#")):
+                        continue
+                    self._check_asset(html_file, href, report.links)
 
                 # Check CSS
                 for link in soup.find_all("link", rel="stylesheet"):
@@ -144,6 +184,9 @@ class CloneValidator:
 
             except Exception as e:
                 logger.error("Validation error in %s: %s", html_file, e)
+
+        if frontend_only_detected:
+            logger.warning("\n[!] Frontend-only clone detected. Dynamic functionality depends on backend services and may not work offline.\n")
 
         # Check fonts referenced in CSS files
         for css_file in self.clone_dir.rglob("*.css"):

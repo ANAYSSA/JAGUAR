@@ -79,6 +79,14 @@ class Rebuilder:
                 inline_fixed += 1
         summary["inline_styles_fixed"] = inline_fixed
 
+        # Phase 7: Fix CSS files
+        css_files = list(self.clone_dir.rglob("*.css"))
+        css_fixed = 0
+        for css_file in css_files:
+            if self._fix_css_file(css_file):
+                css_fixed += 1
+        summary["css_files_fixed"] = css_fixed
+
         logger.info("Rebuild complete: %s", summary)
         return summary
 
@@ -165,6 +173,14 @@ class Rebuilder:
                 # Maybe it is relative to the html file's directory?
                 target_path = (html_path.parent / val).resolve()
 
+            if not target_path.exists():
+                # Repair broken path by searching the directory
+                filename = val.split("/")[-1].split("?")[0].split("#")[0]
+                if filename:
+                    found = self._find_asset_in_clone(filename)
+                    if found:
+                        target_path = found
+
             if target_path.exists():
                 rel = self._relative_from(html_path, target_path)
                 if rel != val:
@@ -234,14 +250,27 @@ class Rebuilder:
         origin = f"{self.base_parsed.scheme}://{self.base_parsed.netloc}"
 
         def fix_style_url(match: re.Match[str]) -> str:
-            url = match.group(1).strip("'\"")
+            url = match.group(1).strip("'\"").strip()
+            if url.startswith("data:"):
+                return match.group(0)
+
+            path_to_check = None
             if url.startswith(origin):
-                path = url[len(origin):].lstrip("/")
-                rel = self._relative_from(html_path, self.clone_dir / path)
-                return f"url('{rel}')"
-            if url.startswith("/") and not url.startswith("//"):
-                path = url.lstrip("/")
-                rel = self._relative_from(html_path, self.clone_dir / path)
+                path_to_check = self.clone_dir / url[len(origin):].lstrip("/")
+            elif url.startswith("/") and not url.startswith("//"):
+                path_to_check = self.clone_dir / url.lstrip("/")
+            else:
+                path_to_check = (html_path.parent / url.split("?")[0].split("#")[0]).resolve()
+
+            if not path_to_check or not path_to_check.exists():
+                filename = url.split("/")[-1].split("?")[0].split("#")[0]
+                if filename:
+                    found = self._find_asset_in_clone(filename)
+                    if found:
+                        path_to_check = found
+
+            if path_to_check and path_to_check.exists():
+                rel = self._relative_from(html_path, path_to_check)
                 return f"url('{rel}')"
             return match.group(0)
 
@@ -251,6 +280,54 @@ class Rebuilder:
             html_path.write_text(content, encoding="utf-8")
             return True
         return False
+
+    def _fix_css_file(self, css_path: Path) -> bool:
+        """Fix url() references inside CSS files."""
+        try:
+            content = css_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        original = content
+        origin = f"{self.base_parsed.scheme}://{self.base_parsed.netloc}"
+
+        def fix_css_url(match: re.Match[str]) -> str:
+            url = match.group(1).strip("'\"").strip()
+            if url.startswith("data:"):
+                return match.group(0)
+
+            path_to_check = None
+            if url.startswith(origin):
+                path_to_check = self.clone_dir / url[len(origin):].lstrip("/")
+            elif url.startswith("/") and not url.startswith("//"):
+                path_to_check = self.clone_dir / url.lstrip("/")
+            else:
+                path_to_check = (css_path.parent / url.split("?")[0].split("#")[0]).resolve()
+
+            if not path_to_check or not path_to_check.exists():
+                filename = url.split("/")[-1].split("?")[0].split("#")[0]
+                if filename:
+                    found = self._find_asset_in_clone(filename)
+                    if found:
+                        path_to_check = found
+
+            if path_to_check and path_to_check.exists():
+                rel = self._relative_from(css_path, path_to_check)
+                return f"url('{rel}')"
+            return match.group(0)
+
+        content = re.sub(r"url\(\s*([^)]+)\s*\)", fix_css_url, content)
+
+        if content != original:
+            css_path.write_text(content, encoding="utf-8")
+            return True
+        return False
+
+    def _find_asset_in_clone(self, filename: str) -> Path | None:
+        if not filename:
+            return None
+        matches = list(self.clone_dir.rglob(filename))
+        return matches[0] if matches else None
 
     def _fix_manifests(self) -> int:
         """Fix paths in manifest.json / site.webmanifest files."""

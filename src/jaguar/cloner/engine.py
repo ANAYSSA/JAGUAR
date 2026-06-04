@@ -62,6 +62,36 @@ class ClonerEngine:
         self.spa_renderer: SPARenderer | None = None
         self.browser_manager = None
         self.base_url = ""
+        self.site_language = ""
+        self.language_source = ""
+
+    async def _detect_language(self, url: str) -> None:
+        self.language_source = "OS Locale"
+        import locale
+        loc, _ = locale.getdefaultlocale()
+        self.site_language = loc or "en-US"
+
+        try:
+            assert self.http is not None
+            response = await self.http.get(url, use_cache=False)
+
+            lang = response.headers.get("Content-Language")
+            if lang:
+                self.site_language = lang.split(",")[0].strip()
+                self.language_source = "Header"
+                return
+
+            if response.content_type.startswith("text/html"):
+                from bs4 import BeautifulSoup, Tag
+                soup = BeautifulSoup(response.body, "lxml")
+                html_tag = soup.find("html")
+                if isinstance(html_tag, Tag):
+                    lang_attr = html_tag.get("lang")
+                    if lang_attr:
+                        self.site_language = str(lang_attr)
+                        self.language_source = "HTML"
+        except Exception as e:
+            logger.debug("Failed to detect language: %s", e)
 
     async def clone(self, url: str) -> str:
         """
@@ -112,6 +142,7 @@ class ClonerEngine:
         try:
             async with HttpClient(http_config) as http:
                 self.http = http
+                await self._detect_language(self.base_url)
 
                 # Create workers for HTML pages
                 page_workers = [
@@ -125,9 +156,12 @@ class ClonerEngine:
                     for _ in range(self.concurrency)
                 ]
 
-                # Wait for queues to empty
-                await self._queue.join()
-                await self._assets_queue.join()
+                # Wait for queues to empty with timeout protection
+                try:
+                    await asyncio.wait_for(self._queue.join(), timeout=30)
+                    await asyncio.wait_for(self._assets_queue.join(), timeout=30)
+                except TimeoutError:
+                    logger.warning("Clone queues timed out during shutdown. Forcing exit.")
 
                 # Cancel workers
                 for w in page_workers + asset_workers:
@@ -239,6 +273,13 @@ class ClonerEngine:
                 url, depth = await self._queue.get()
 
                 if len(self._visited) >= self.max_pages:
+                    # Drain remaining queue instantly
+                    while not self._queue.empty():
+                        try:
+                            self._queue.get_nowait()
+                            self._queue.task_done()
+                        except asyncio.QueueEmpty:
+                            break
                     continue
 
                 await self._process_page(url, depth, base_dir)
@@ -276,7 +317,7 @@ class ClonerEngine:
         if self.render_spa and self.spa_renderer:
             # Render JS-heavy page
             try:
-                html_content = await self.spa_renderer.render_to_static_html(url)
+                html_content = await self.spa_renderer.render_to_static_html(url, locale=self.site_language)
             except Exception as e:
                 logger.warning("SPA render failed for %s, falling back to basic HTTP: %s", url, e)
 
