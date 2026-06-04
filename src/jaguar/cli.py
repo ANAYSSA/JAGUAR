@@ -20,7 +20,7 @@ from rich.text import Text
 
 if sys.platform == "win32":
     with contextlib.suppress(Exception):
-        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stdout.reconfigure(encoding='utf-8')  # type: ignore[union-attr]
     from asyncio.proactor_events import _ProactorBasePipeTransport
     from functools import wraps
     def silence_event_loop_closed(func): # type: ignore
@@ -181,36 +181,48 @@ def scan(url: str, format: str, output: str | None, no_browser: bool, no_store: 
 @click.option("--pages", "-p", default=50, help="Maximum number of pages to clone.")
 @click.option("--spa", is_flag=True, help="Use browser to pre-render single page applications.")
 @click.option("--serve", is_flag=True, help="Start a local server to view the clone immediately.")
-def clone(url: str, depth: int, pages: int, spa: bool, serve: bool) -> None:
+@click.option("--verify", is_flag=True, help="Capture screenshots and compare visual accuracy.")
+def clone(url: str, depth: int, pages: int, spa: bool, serve: bool, verify: bool) -> None:
     """Clone a website for offline viewing."""
 
     async def _clone() -> None:
         click.echo(f"Initializing JAGUAR Cloner for {url}...")
-        engine = ClonerEngine(max_depth=depth, max_pages=pages, render_spa=spa)
+        engine = ClonerEngine(max_depth=depth, max_pages=pages, render_spa=spa, verify=verify)
 
         output_dir = await engine.clone(url)
         import os
         click.echo(f"\nClone successful.\n\nFiles saved to:\n{os.path.abspath(output_dir)}\n")
 
-        index_path = os.path.join(output_dir, "index.html")
-        if os.path.exists(index_path):
-            with open(index_path, encoding="utf-8") as f:
-                html_content = f.read()
-                is_spa = any(m in html_content for m in ["data-reactroot", 'id="__next"', "data-v-", "ng-version", "data-nuxt"])
-                if is_spa:
-                    click.secho("[WARNING] SPA detected (React/Vue/Next/Angular).", fg="yellow")
-                    click.secho("This clone may require its original backend APIs to function fully offline.\n", fg="yellow")
+        # Display clone health report
+        if engine.clone_report:
+            report = engine.clone_report
+            click.secho(f"Clone Health: {report.overall_health}%", fg="green" if report.overall_health >= 90 else "yellow")
+            click.echo(f"  HTML: {report.html.percentage}%  CSS: {report.css.percentage}%  JS: {report.js.percentage}%")
+            click.echo(f"  Fonts: {report.fonts.percentage}%  Images: {report.images.percentage}%")
+            if report.total_missing > 0:
+                click.secho(f"  Missing Resources: {report.total_missing}", fg="yellow")
+            if report.is_spa:
+                click.secho("\n[WARNING] SPA detected (React/Vue/Next/Angular).", fg="yellow")
+                click.secho("This clone may require its original backend APIs to function fully offline.", fg="yellow")
+            click.echo("")
 
-            if not serve:
-                click.echo("To view locally:\npython -m http.server 8080")
-                click.echo("\nThen open:\nhttp://localhost:8080\n")
+        # Display visual accuracy if --verify
+        if engine.visual_result and engine.visual_result.accuracy >= 0:
+            vr = engine.visual_result
+            click.secho(f"Visual Accuracy: {vr.accuracy}%", fg="green" if vr.accuracy >= 90 else "yellow")
+            click.echo(f"  Different Pixels: {vr.diff_pixels}")
+            click.echo("")
+
+        if not serve:
+            click.echo("To view locally:\njaguar serve " + os.path.abspath(output_dir))
+            click.echo("\nOr:\npython -m http.server 8080\n")
 
         if serve:
             import http.server
             import socketserver
             class Handler(http.server.SimpleHTTPRequestHandler):
-                def __init__(self, *args, **kwargs):
-                    super().__init__(*args, directory=output_dir, **kwargs)
+                def __init__(self, *args: object, **kwargs: object) -> None:
+                    super().__init__(*args, directory=output_dir, **kwargs)  # type: ignore[arg-type]
             port = 8080
             click.echo(f"Serving:\n{os.path.abspath(output_dir)}\n\nOpen:\nhttp://localhost:{port}")
             try:
@@ -231,9 +243,16 @@ def serve(path: str, port: int = 8080) -> None:
     import os
     import socketserver
 
+    from jaguar.cloner.server import ensure_root_index
+
+    # Smart entry-point detection
+    entry = ensure_root_index(path)
+    if entry:
+        click.echo(f"Entry Point Detected:\n{entry}\n")
+
     class Handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=path, **kwargs)
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, directory=path, **kwargs)  # type: ignore[arg-type]
 
     click.echo(f"Serving:\n{os.path.abspath(path)}\n\nOpen:\nhttp://localhost:{port}")
     try:
@@ -241,6 +260,7 @@ def serve(path: str, port: int = 8080) -> None:
             httpd.serve_forever()
     except KeyboardInterrupt:
         click.echo("\nServer stopped.")
+
 @cli.command()
 @click.argument("url_a")
 @click.argument("url_b")
