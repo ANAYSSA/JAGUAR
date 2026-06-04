@@ -18,6 +18,7 @@ import threading
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 from socketserver import TCPServer
+from typing import Any
 
 logger = logging.getLogger("jaguar.cloner.server")
 
@@ -85,6 +86,49 @@ def ensure_root_index(directory: str) -> str | None:
     return None
 
 
+class SPARequestHandler(SimpleHTTPRequestHandler):
+    """Custom handler for SPA routing and asset error logging."""
+
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        if code == 404:
+            # Check if this looks like an asset vs a route
+            path = self.path.split('?')[0].split('#')[0]
+            ext = Path(path).suffix.lower()
+
+            # Known asset extensions that should naturally 404 instead of serving index.html
+            asset_exts = {'.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.woff2', '.ttf', '.json', '.webmanifest'}
+
+            if ext in asset_exts:
+                # Log actual broken asset!
+                # We use print here with ANSI colors because the standard logger might not hit the console nicely if rich isn't wrapping it.
+                print(f"\033[91m[404] Broken Asset:\033[0m {self.path}")
+                super().send_error(code, message, explain)
+                return
+
+            # Otherwise, assume it's a client-side SPA route and return index.html
+            index_path = Path(self.directory) / "index.html"
+            if index_path.exists():
+                try:
+                    with open(index_path, 'rb') as f:
+                        content = f.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                    return
+                except Exception:
+                    pass
+
+            print(f"\033[91m[404] Route Not Found:\033[0m {self.path}")
+
+        super().send_error(code, message, explain)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        # Suppress standard HTTP logs unless it's an error to keep console clean during SPA testing
+        pass
+
+
 class CloneServer:
     """Simple HTTP server to serve cloned websites locally."""
 
@@ -109,7 +153,7 @@ class CloneServer:
         os.chdir(self.directory)
 
         try:
-            handler = SimpleHTTPRequestHandler
+            handler = SPARequestHandler
             # allow_reuse_address prevents "Address already in use" errors
             TCPServer.allow_reuse_address = True
 

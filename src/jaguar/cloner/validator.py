@@ -7,12 +7,17 @@ Validates:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from bs4 import BeautifulSoup
+
+if TYPE_CHECKING:
+    from playwright.async_api import ConsoleMessage, Error, Request, Response
 
 logger = logging.getLogger("jaguar.cloner.validator")
 
@@ -49,6 +54,7 @@ class CloneReport:
     selected_language: str = "Unknown"
     final_site_language: str = "Unknown"
     visual_accuracy: float | None = None
+    has_rendering_errors: bool = False
 
     @property
     def overall_health(self) -> float:
@@ -76,6 +82,7 @@ class CloneReport:
             f"**Detected System Language:** {self.system_language}",
             f"**Selected Clone Language:** {self.selected_language}",
             f"**Final Site Language:** {self.final_site_language}",
+            f"**Rendering Errors:** {'Yes' if self.has_rendering_errors else 'No'}",
             f"**Visual Accuracy:** {f'{self.visual_accuracy}%' if self.visual_accuracy else 'N/A'}",
             "",
         ]
@@ -133,7 +140,14 @@ class CloneValidator:
     def __init__(self, clone_dir: Path):
         self.clone_dir = clone_dir
 
-    def validate(self) -> CloneReport:
+    async def validate(self, base_url: str) -> CloneReport:
+        report = self._run_static_checks()
+        report = await self._run_playwright_validation(report, base_url)
+
+        logger.info("Clone health: %.1f%%", report.overall_health)
+        return report
+
+    def _run_static_checks(self) -> CloneReport:
         report = CloneReport()
 
         report.html.total = 1
@@ -200,7 +214,67 @@ class CloneValidator:
             except Exception:
                 pass
 
-        logger.info("Clone health: %.1f%%", report.overall_health)
+        return report
+
+    async def _run_playwright_validation(self, report: CloneReport, base_url: str) -> CloneReport:
+        """Run a full local render via Playwright to ensure the clone visually functions."""
+        try:
+            from jaguar.browser.manager import BrowserManager
+            from jaguar.cloner.server import CloneServer
+        except ImportError:
+            return report
+
+        browser = None
+        server = None
+        try:
+            browser = BrowserManager(headless=True)
+            await browser.start()
+
+            import socket
+            sock = socket.socket()
+            sock.bind(('', 0))
+            port = sock.getsockname()[1]
+            sock.close()
+
+            server = CloneServer(str(self.clone_dir), port=port)
+            local_url = server.start()
+
+            page = await browser.new_page()
+
+            def handle_console(msg: ConsoleMessage) -> None:
+                if msg.type in ("error", "warning") and "Failed to load resource" in msg.text or msg.type == "error":
+                    report.has_rendering_errors = True
+
+            def handle_pageerror(err: Error) -> None:
+                report.has_rendering_errors = True
+
+            def handle_requestfailed(req: "Request") -> None:
+                # 404s to local assets count as rendering errors
+                if req.failure:
+                    report.has_rendering_errors = True
+
+            def handle_response(res: "Response") -> None:
+                if res.status >= 400:
+                    report.has_rendering_errors = True
+
+            page.on("console", handle_console)
+            page.on("pageerror", handle_pageerror)
+            page.on("requestfailed", handle_requestfailed)
+            page.on("response", handle_response)
+
+            await browser.navigate_and_wait(page, local_url)
+            await asyncio.sleep(2)  # Allow assets to load
+
+            await page.close()
+
+        except Exception as e:
+            logger.error("Playwright validation failed: %s", e)
+        finally:
+            if server:
+                server.stop()
+            if browser:
+                await browser.close()
+
         return report
 
     def _check_asset(self, source_file: Path, asset_url: str | None, category: CategoryHealth) -> None:

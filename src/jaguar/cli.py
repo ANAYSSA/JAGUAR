@@ -16,7 +16,6 @@ import click
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.text import Text
 
 if sys.platform == "win32":
     with contextlib.suppress(Exception):
@@ -53,9 +52,9 @@ console = Console()
 
 def display_banner() -> None:
     """Print the JAGUAR premium ASCII banner."""
-    from rich.panel import Panel
     from rich.align import Align
-    
+    from rich.panel import Panel
+
     banner = """
 [bold cyan]██████████████████████████████████████████████████[/bold cyan]
 [bold cyan]█[/bold cyan] [bold white]██╗ █████╗  ██████╗ ██╗   ██╗ █████╗ ██████╗[/bold white] [bold cyan]█[/bold cyan]
@@ -138,23 +137,23 @@ def version() -> None:
     import importlib.metadata
     import importlib.util
     import os
-    
+
     try:
         ver = importlib.metadata.version("jaguar")
     except importlib.metadata.PackageNotFoundError:
         ver = "Unknown (not installed via pip)"
-        
+
     spec = importlib.util.find_spec("jaguar")
     pkg_path = spec.origin if spec else "Unknown"
     if pkg_path and pkg_path.endswith("__init__.py"):
         pkg_path = os.path.dirname(os.path.dirname(pkg_path))
-        
+
     project_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    
+
     install_type = "Standard"
     if pkg_path and os.path.abspath(pkg_path).lower() == os.path.abspath(os.path.join(project_path, "src")).lower():
         install_type = "Editable"
-        
+
     click.echo(f"Version: {ver}")
     click.echo(f"Install Type: {install_type}")
     click.echo(f"Project Path: {project_path}")
@@ -210,11 +209,11 @@ def scan(url: str, format: str, output: str | None, no_browser: bool, no_store: 
 @click.argument("url")
 @click.option("--depth", "-d", default=1, help="Crawl depth.")
 @click.option("--pages", "-p", default=50, help="Maximum number of pages to clone.")
-@click.option("--lang", help="Override the clone language (e.g. en-US, ru-RU).")
+@click.option("--lang", default="auto", help="Override the clone language (e.g. en-US, ru-RU). Default is 'auto'.")
 @click.option("--spa", is_flag=True, help="Use browser to pre-render single page applications.")
 @click.option("--serve", is_flag=True, help="Start a local server to view the clone immediately.")
 @click.option("--verify", is_flag=True, help="Capture screenshots and compare visual accuracy.")
-def clone(url: str, depth: int, pages: int, lang: str | None, spa: bool, serve: bool, verify: bool) -> None:
+def clone(url: str, depth: int, pages: int, lang: str, spa: bool, serve: bool, verify: bool) -> None:
     """Clone a website for offline viewing."""
 
     async def _clone() -> None:
@@ -227,10 +226,8 @@ def clone(url: str, depth: int, pages: int, lang: str | None, spa: bool, serve: 
 
         import time
         start_time = time.time()
-        
+
         from rich.progress import Progress, SpinnerColumn, TextColumn
-        from rich.live import Live
-        from rich.panel import Panel
 
         clone_task = asyncio.create_task(engine.clone(url))
 
@@ -241,13 +238,13 @@ def clone(url: str, depth: int, pages: int, lang: str | None, spa: bool, serve: 
             transient=True,
         ) as progress:
             task_id = progress.add_task("[cyan]Cloning website...", total=None)
-            
+
             while not clone_task.done():
                 elapsed = int(time.time() - start_time)
                 mins, secs = divmod(elapsed, 60)
                 hours, mins = divmod(mins, 60)
                 elapsed_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
-                
+
                 queue_size = engine._queue.qsize() + engine._assets_queue.qsize()
                 processed = len(engine._visited)
                 assets = len(engine._assets_visited)
@@ -255,7 +252,7 @@ def clone(url: str, depth: int, pages: int, lang: str | None, spa: bool, serve: 
                 current = getattr(engine, "current_url", "")
                 if len(current) > 50:
                     current = current[:47] + "..."
-                
+
                 desc = (
                     f"[bold cyan]Cloning...[/bold cyan]\n"
                     f"Processed URLs:    [white]{processed}[/white]\n"
@@ -267,11 +264,11 @@ def clone(url: str, depth: int, pages: int, lang: str | None, spa: bool, serve: 
                 )
                 progress.update(task_id, description=desc)
                 await asyncio.sleep(0.2)
-                
+
         output_dir = clone_task.result()
 
-        elapsed = time.time() - start_time
-        mins, secs = divmod(int(elapsed), 60)
+        elapsed_total = time.time() - start_time
+        mins, secs = divmod(int(elapsed_total), 60)
         hours, mins = divmod(mins, 60)
         elapsed_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
 
@@ -286,10 +283,10 @@ def clone(url: str, depth: int, pages: int, lang: str | None, spa: bool, serve: 
                 c.resolved for c in [report.css, report.js, report.images, report.fonts, report.svg, report.manifest, report.media]
             )
             click.echo(f"Assets Downloaded: {downloaded}")
-            
+
             failed = getattr(engine, "failed_assets_count", 0)
             click.echo(f"Failed Assets: {failed}")
-            
+
             click.echo(f"Missing Assets: {report.total_missing}")
 
             if engine.visual_result and engine.visual_result.accuracy >= 0:
@@ -326,51 +323,69 @@ def clone(url: str, depth: int, pages: int, lang: str | None, spa: bool, serve: 
     _run_async(_clone())
 
 
-@cli.command()
-@click.argument("path", type=click.Path(exists=False, file_okay=False, dir_okay=True))
-@click.option("--port", default=8080, help="Port to serve on.")
-def serve(path: str, port: int = 8080) -> None:
-    """Serve a cloned website locally."""
-    import http.server
-    import os
-    import socketserver
+@cli.command(name="clone-doctor")
+@click.argument("path")
+def clone_doctor(path: str) -> None:
+    """Diagnose broken assets in a cloned website."""
     from pathlib import Path
-
-    from jaguar.cloner.server import ensure_root_index
-    from jaguar.config import load_config
-
-    cfg = load_config()
-    clone_dir = Path(cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones"))
-
-    target_path = Path(path)
-    if path.lower() == "latest":
-        dirs = [d for d in clone_dir.iterdir() if d.is_dir()]
-        if not dirs:
-            click.echo("Error: No clones found in clone directory.")
-            return
-        target_path = max(dirs, key=os.path.getmtime)
-        click.echo(f"Resolved 'latest' to: {target_path.name}")
-    elif not target_path.exists() and (clone_dir / path).exists():
-        target_path = clone_dir / path
-    elif not target_path.exists():
-        click.echo(f"Error: Path {path} does not exist.")
+    click.echo(f"Running clone doctor on: {path}\n")
+    clone_dir = Path(path)
+    if not clone_dir.exists():
+        click.echo("Error: Directory does not exist.", err=True)
         return
 
-    # Smart entry-point detection
-    entry = ensure_root_index(str(target_path))
-    if entry:
-        click.echo(f"Entry Point Detected:\n{entry}\n")
+    from jaguar.cloner.validator import CloneValidator
+    validator = CloneValidator(clone_dir)
+    report = validator._run_static_checks()
 
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            super().__init__(*args, directory=path, **kwargs)  # type: ignore[arg-type]
+    broken = False
+    for name, cat in [
+        ("Broken HTML", report.html),
+        ("Broken CSS", report.css),
+        ("Broken JS", report.js),
+        ("Broken Images", report.images),
+        ("Broken Fonts", report.fonts),
+        ("Broken SVG", report.svg),
+    ]:
+        if cat.missing:
+            broken = True
+            click.echo(f"\033[91m{name}:\033[0m")
+            for m in cat.missing[:10]:
+                click.echo(f"  - {m}")
+            if len(cat.missing) > 10:
+                click.echo(f"  ... and {len(cat.missing)-10} more.")
+            click.echo()
 
-    click.echo(f"Serving:\n{os.path.abspath(path)}\n\nOpen:\nhttp://localhost:{port}")
+    if not broken:
+        click.echo("\033[92mAll static assets are perfectly intact!\033[0m")
+    else:
+        click.echo("\n\033[93mProposed Fixes:\033[0m")
+        click.echo("1. Rerun clone with --spa to ensure dynamic assets are fetched.")
+        click.echo("2. Check network connectivity during cloning.")
+        click.echo("3. Run `jaguar serve <path>` to observe real-time 404 network errors in the console.")
+
+
+@cli.command()
+@click.argument("path")
+@click.option("--port", default=8080, help="Port to serve on.")
+def serve(path: str, port: int) -> None:
+    """Serve a cloned website locally with SPA routing support."""
+    from jaguar.cloner.server import CloneServer
+
     try:
-        with socketserver.TCPServer(("127.0.0.1", port), Handler) as httpd:
-            httpd.serve_forever()
+        server = CloneServer(path, port=port)
+        url = server.start()
+        click.echo(f"Serving {path} at {url}")
+        click.echo("Press Ctrl+C to stop.")
+
+        import time
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
-        click.echo("\nServer stopped.")
+        click.echo("\nStopping server...")
+        server.stop()
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
 
 @cli.command()
 @click.argument("url_a")

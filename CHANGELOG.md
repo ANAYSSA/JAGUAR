@@ -1,3 +1,14 @@
+## [1.1.1] - 2026-06-04
+### Added
+- Universal Playwright-driven rendering validation: Clone Health is now benchmarked against an actual offline Chromium render instance verifying DOM layout and HTTP 404s dynamically.
+- `jaguar clone-doctor <path>` CLI command to instantly diagnose broken local asset references.
+- `jaguar serve <path>` now embeds a native SPA `SPARequestHandler` that cleanly intercepts 404s, returning `index.html` to allow Next.js/React/Vue client routing to execute seamlessly while still natively logging broken `.css`/`.js` fetches to the CLI.
+
+### Fixed
+- Fixed critical CSS variable parsing where `url()` statements nested inside `var(--prop, url(...))` were ignored.
+- Fixed an issue where deeply nested `@import` CSS files failed to recursively anchor their child URLs properly.
+- `Clone Health: 100%` is now hard-blocked if any offline console errors or missing Playwright network intercepts fire, preventing false-positive success reporting.
+
 ## [1.0.9] - 2026-06-04
 ### Added
 - Native OS UI Language Detection mapping Windows kernel display settings directly to JAGUAR.

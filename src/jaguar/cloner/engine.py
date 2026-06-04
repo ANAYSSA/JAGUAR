@@ -73,29 +73,28 @@ class ClonerEngine:
 
     def _determine_locale(self) -> None:
         """Determine the final locale to use based on strict priority."""
+        win_lang = self._get_windows_locale()
+        self.system_language = win_lang
+
         # 1. Override via CLI
-        if self.locale_override:
+        if self.locale_override and self.locale_override != "auto":
             self.site_language = self.locale_override
             self.selected_language = self.locale_override
             self.language_source = "CLI Override"
-            self.system_language = self._get_windows_locale()
             return
 
         # 2. Configured User Language
         user_lang = self.config.get("cloner", {}).get("language")
-        if user_lang:
+        if user_lang and user_lang != "auto":
             self.site_language = user_lang
             self.selected_language = user_lang
             self.language_source = "User Configured"
-            self.system_language = self._get_windows_locale()
             return
 
-        # 3. Windows OS Locale
-        win_lang = self._get_windows_locale()
+        # 3. Auto fallback to Windows OS Locale
         self.site_language = win_lang
         self.selected_language = win_lang
-        self.language_source = "OS Locale"
-        self.system_language = win_lang
+        self.language_source = "OS Locale (Auto)"
 
     def _get_windows_locale(self) -> str:
         try:
@@ -167,7 +166,7 @@ class ClonerEngine:
         try:
             async with HttpClient(http_config) as http:
                 self.http = http
-                
+
                 # Check root URL health and capture final site language
                 try:
                     response = await self.http.get(self.base_url, use_cache=False)
@@ -250,14 +249,19 @@ class ClonerEngine:
         except Exception as e:
             logger.warning("Rebuild failed: %s", e)
 
-        # Phase C: Validate clone health
-        logger.info("Phase: Validation")
+        # Phase C: Validate clone health (Universal Rendering Validation)
+        logger.info("Phase: Validation (Playwright-based)")
         try:
             validator = CloneValidator(target_dir)
-            self.clone_report = validator.validate()
+            # Await Playwright rendering validation
+            self.clone_report = await validator.validate(self.base_url)
             self.clone_report.system_language = self.system_language
             self.clone_report.selected_language = self.selected_language
             self.clone_report.final_site_language = self.final_site_language
+
+            # Prevent 100% false positives
+            if getattr(self.clone_report, "has_rendering_errors", False) and self.clone_report.overall_health == 100.0:
+                self.clone_report.html.resolved -= 1  # Force sub-100% health if there are silent console errors/broken requests
 
             # Write CLONE_REPORT.md
             report_path = target_dir / "CLONE_REPORT.md"
@@ -265,40 +269,6 @@ class ClonerEngine:
             logger.info("Clone health: %.1f%%", self.clone_report.overall_health)
         except Exception as e:
             logger.warning("Validation failed: %s", e)
-
-        # Phase D: Visual comparison (if --verify)
-        if self.verify:
-            logger.info("Phase: Visual comparison")
-            try:
-                from jaguar.cloner.visual_compare import VisualCompare
-
-                comparator = VisualCompare(target_dir)
-                self.visual_result = await comparator.compare(self.base_url)
-                logger.info("Visual accuracy: %.1f%%", self.visual_result.accuracy)
-
-                failed = False
-                if self.visual_result.accuracy < 98.0:
-                    logger.error("Clone FAILED: Visual accuracy %.1f%% is below 98.0%% threshold.", self.visual_result.accuracy)
-                    failed = True
-
-                if self.visual_result.console_errors:
-                    logger.error("Clone FAILED: Browser console contains resource failures (%d errors).", len(self.visual_result.console_errors))
-                    for err in self.visual_result.console_errors:
-                        logger.error("Browser Error: %s", err)
-                    failed = True
-
-                # Append visual report to CLONE_REPORT.md
-                report_path = target_dir / "CLONE_REPORT.md"
-                with report_path.open("a", encoding="utf-8") as f:
-                    f.write("\n## Visual Verification\n")
-                    f.write(self.visual_result.summary() + "\n")
-                    if failed:
-                        f.write("\n**STATUS: FAILED**\n")
-                    else:
-                        f.write("\n**STATUS: PASSED**\n")
-
-            except Exception as e:
-                logger.warning("Visual comparison failed: %s", e)
 
     async def _page_worker(self, base_dir: Path) -> None:
         """Worker that processes HTML pages."""

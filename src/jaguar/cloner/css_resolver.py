@@ -210,11 +210,11 @@ class CSSResolver:
     def _url_to_local_path(self, url: str) -> Path:
         """Convert an absolute URL to a local filesystem path."""
         parsed = urlparse(url)
-        path = parsed.path
+        import posixpath
+        path = posixpath.normpath(parsed.path)
         if not path or path == "/":
             path = "/index.css"
         path = path.lstrip("/")
-        path = path.replace("../", "").replace("..\\", "")
         return self.base_dir / path
 
     def _get_relative_path(self, from_file: Path, to_file: Path) -> str:
