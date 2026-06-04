@@ -29,6 +29,11 @@ HEADER_SIGNATURES = {
         r"gunicorn": "Gunicorn",
         r"uvicorn": "Uvicorn",
         r"werkzeug": "Werkzeug (Python)",
+        r"gws": "Google Web Server",
+        r"akamai": "Akamai",
+        r"fastly": "Fastly",
+        r"netlify": "Netlify",
+        r"vercel": "Vercel",
     },
     "X-Powered-By": {
         r"php": "PHP",

@@ -34,8 +34,11 @@ jaguar scan https://example.com -g full
 # Compare against a competitor
 jaguar compare https://example.com https://competitor.com
 
-# Clone a Next.js / React application offline
-jaguar clone https://nextjs.org --spa
+# Clone a Next.js / React application offline and serve it
+jaguar clone https://nextjs.org --spa --serve
+
+# Serve a previously cloned application locally
+jaguar serve ./jaguar-clones/nextjs.org
 ```
 
 ## 📖 Documentation

@@ -36,7 +36,6 @@ if sys.platform == "win32":
 from jaguar import __version__
 from jaguar.analyzers import get_all_analyzers
 from jaguar.cloner.engine import ClonerEngine
-from jaguar.cloner.server import CloneServer
 from jaguar.comparator.engine import ComparisonEngine
 from jaguar.core.engine import ScanEngine
 from jaguar.reporters import get_all_reporters
@@ -190,25 +189,58 @@ def clone(url: str, depth: int, pages: int, spa: bool, serve: bool) -> None:
         engine = ClonerEngine(max_depth=depth, max_pages=pages, render_spa=spa)
 
         output_dir = await engine.clone(url)
-        click.echo(f"\nClone successful! Files saved to: {output_dir}")
+        import os
+        click.echo(f"\nClone successful.\n\nFiles saved to:\n{os.path.abspath(output_dir)}\n")
+
+        index_path = os.path.join(output_dir, "index.html")
+        if os.path.exists(index_path):
+            with open(index_path, encoding="utf-8") as f:
+                html_content = f.read()
+                is_spa = any(m in html_content for m in ["data-reactroot", 'id="__next"', "data-v-", "ng-version", "data-nuxt"])
+                if is_spa:
+                    click.secho("[WARNING] SPA detected (React/Vue/Next/Angular).", fg="yellow")
+                    click.secho("This clone may require its original backend APIs to function fully offline.\n", fg="yellow")
+
+            if not serve:
+                click.echo("To view locally:\npython -m http.server 8080")
+                click.echo("\nThen open:\nhttp://localhost:8080\n")
 
         if serve:
-            server = CloneServer(output_dir)
-            local_url = server.start()
-            click.echo(f"Server started. View the clone at: {local_url}")
-            click.echo("Press Ctrl+C to stop.")
+            import http.server
+            import socketserver
+            class Handler(http.server.SimpleHTTPRequestHandler):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, directory=output_dir, **kwargs)
+            port = 8080
+            click.echo(f"Serving:\n{os.path.abspath(output_dir)}\n\nOpen:\nhttp://localhost:{port}")
             try:
-                # Keep alive until interrupted
-                while True:
-                    await asyncio.sleep(1)
+                with socketserver.TCPServer(("127.0.0.1", port), Handler) as httpd:
+                    httpd.serve_forever()
             except KeyboardInterrupt:
-                pass
-            finally:
-                server.stop()
+                click.echo("\nServer stopped.")
 
     _run_async(_clone())
 
 
+@cli.command()
+@click.argument("path", type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.option("--port", default=8080, help="Port to serve on.")
+def serve(path: str, port: int = 8080) -> None:
+    """Serve a cloned website locally."""
+    import http.server
+    import os
+    import socketserver
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=path, **kwargs)
+
+    click.echo(f"Serving:\n{os.path.abspath(path)}\n\nOpen:\nhttp://localhost:{port}")
+    try:
+        with socketserver.TCPServer(("127.0.0.1", port), Handler) as httpd:
+            httpd.serve_forever()
+    except KeyboardInterrupt:
+        click.echo("\nServer stopped.")
 @cli.command()
 @click.argument("url_a")
 @click.argument("url_b")

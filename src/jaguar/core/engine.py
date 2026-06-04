@@ -184,6 +184,14 @@ class ScanEngine:
                     confidence -= 5.0
                 if context.config.get("csp_waf_bypassed"):
                     confidence -= 5.0
+
+                if self.enterprise_mode and "security" in result.analyzer_results:
+                    sec_res = result.analyzer_results["security"]
+                    missing_hsts = any(f.name == "hsts-not-implemented" for f in sec_res.findings)
+                    missing_csp = any(f.name == "csp-not-implemented" for f in sec_res.findings)
+                    if missing_hsts and missing_csp:
+                        confidence -= 25.0
+
                 result.confidence = confidence
                 result.enterprise_mode = self.enterprise_mode
 

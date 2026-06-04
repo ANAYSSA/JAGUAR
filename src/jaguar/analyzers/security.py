@@ -79,6 +79,9 @@ class SecurityAnalyzer(BaseAnalyzer):
             recommendation=""
             if is_https
             else "Configure your web server to serve all content over HTTPS. Obtain a free certificate from Let's Encrypt.",
+            raw_value=ctx.final_url or ctx.url if is_https else "None",
+            expected_value="https://...",
+            source="Final Response URL"
         )
 
     def _check_tls(self, ctx: ScanContext) -> Finding:
@@ -296,6 +299,11 @@ class SecurityAnalyzer(BaseAnalyzer):
     async def _check_csp(self, ctx: ScanContext) -> Finding:
         """Check Content Security Policy header."""
         csp = ctx.response_headers.get("Content-Security-Policy", "")
+        csp_report_only = ctx.response_headers.get("Content-Security-Policy-Report-Only", "")
+        is_report_only = False
+        if not csp and csp_report_only:
+            csp = csp_report_only
+            is_report_only = True
 
         source = "Final Response Headers"
 
@@ -305,6 +313,10 @@ class SecurityAnalyzer(BaseAnalyzer):
             try:
                 alt_resp = await ctx.http.get(ctx.url, use_cache=False, extra_headers=alt_headers)
                 csp = alt_resp.headers.get("Content-Security-Policy", "")
+                if not csp:
+                    csp = alt_resp.headers.get("Content-Security-Policy-Report-Only", "")
+                    if csp:
+                        is_report_only = True
                 if csp:
                     ctx.config["csp_waf_bypassed"] = True
                     source = "Alternate User-Agent Request"
@@ -314,6 +326,10 @@ class SecurityAnalyzer(BaseAnalyzer):
         # Playwright fallback
         if not csp and ctx.playwright_headers:
             csp = ctx.playwright_headers.get("content-security-policy", "")
+            if not csp:
+                csp = ctx.playwright_headers.get("content-security-policy-report-only", "")
+                if csp:
+                    is_report_only = True
             if csp:
                 source = "Playwright Browser Verification"
 
@@ -329,6 +345,21 @@ class SecurityAnalyzer(BaseAnalyzer):
                 raw_value="None",
                 expected_value="Content-Security-Policy header",
                 failure_reason="Header is missing entirely.",
+                source=source
+            )
+
+        if is_report_only:
+            return Finding(
+                name="csp-report-only",
+                title="CSP Report-Only Detected",
+                description="Content Security Policy is in Report-Only mode. It logs violations but does not block attacks.",
+                passed=False,
+                severity=Severity.MEDIUM,
+                score_modifier=-10,
+                recommendation="Enforce the Content Security Policy by moving it to the 'Content-Security-Policy' header.",
+                raw_value=csp,
+                expected_value="Content-Security-Policy header",
+                failure_reason="CSP is only reporting, not enforcing.",
                 source=source
             )
 
@@ -627,6 +658,9 @@ class SecurityAnalyzer(BaseAnalyzer):
 
         # Also check CSP frame-ancestors
         csp = ctx.response_headers.get("Content-Security-Policy", "")
+        csp_report_only = ctx.response_headers.get("Content-Security-Policy-Report-Only", "")
+        if not csp and csp_report_only:
+            csp = csp_report_only
         has_frame_ancestors = "frame-ancestors" in csp.lower()
 
         if has_frame_ancestors:

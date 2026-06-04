@@ -1,3 +1,10 @@
+## [1.0.3] - Enterprise Calibration & Clone UX
+- Added jaguar serve command for local cloning.
+- Added --serve flag to clone command.
+- Improved CSP parsing (Report-Only detection).
+- Added GWS server fingerprinting.
+- Adjusted SEO heuristic confidence models for enterprise scans.
+
 # Changelog
 
 All notable changes to JAGUAR will be documented in this file.

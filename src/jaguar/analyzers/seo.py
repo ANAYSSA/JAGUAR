@@ -28,9 +28,9 @@ class SEOAnalyzer(BaseAnalyzer):
         findings: list[Finding] = []
 
         findings.append(self._check_title(html))
-        findings.append(self._check_meta_description(html))
-        findings.append(self._check_canonical(html))
-        findings.extend(self._check_open_graph(html))
+        findings.append(self._check_meta_description(html, context))
+        findings.append(self._check_canonical(html, context))
+        findings.extend(self._check_open_graph(html, context))
         findings.append(self._check_robots_meta(html))
         findings.append(await self._check_robots_txt(context))
         findings.append(await self._check_sitemap(context))
@@ -88,7 +88,7 @@ class SEOAnalyzer(BaseAnalyzer):
             data={"title": title, "length": length},
         )
 
-    def _check_meta_description(self, html: str) -> Finding:
+    def _check_meta_description(self, html: str, ctx: ScanContext) -> Finding:
         match = re.search(
             r'<meta\s+name=["\']description["\']\s+content=["\']([^"\']*)["\']',
             html,
@@ -101,13 +101,14 @@ class SEOAnalyzer(BaseAnalyzer):
                 re.IGNORECASE,
             )
         if not match or not match.group(1).strip():
+            is_ent = ctx.config.get("enterprise_mode", False)
             return Finding(
                 name="missing-meta-description",
                 title="Missing Meta Description",
                 description="No meta description found. This affects click-through rates in search results.",
                 passed=False,
-                severity=Severity.HIGH,
-                score_modifier=-10,
+                severity=Severity.LOW if is_ent else Severity.HIGH,
+                score_modifier=0 if is_ent else -10,
                 recommendation="Add <meta name='description' content='...'> (150-160 chars).",
             )
         desc = match.group(1).strip()
@@ -133,7 +134,7 @@ class SEOAnalyzer(BaseAnalyzer):
             data={"description": desc, "length": length},
         )
 
-    def _check_canonical(self, html: str) -> Finding:
+    def _check_canonical(self, html: str, ctx: ScanContext) -> Finding:
         match = re.search(
             r'<link[^>]*rel=["\']canonical["\'][^>]*href=["\']([^"\']+)["\']', html, re.IGNORECASE
         )
@@ -144,13 +145,14 @@ class SEOAnalyzer(BaseAnalyzer):
                 re.IGNORECASE,
             )
         if not match:
+            is_ent = ctx.config.get("enterprise_mode", False)
             return Finding(
                 name="missing-canonical",
                 title="Missing Canonical URL",
                 description="No canonical URL tag found. This can lead to duplicate content issues.",
                 passed=False,
-                severity=Severity.MEDIUM,
-                score_modifier=-5,
+                severity=Severity.LOW if is_ent else Severity.MEDIUM,
+                score_modifier=0 if is_ent else -5,
                 recommendation="Add <link rel='canonical' href='...'> to specify the preferred URL.",
             )
         return Finding(
@@ -163,7 +165,7 @@ class SEOAnalyzer(BaseAnalyzer):
             data={"canonical": match.group(1)},
         )
 
-    def _check_open_graph(self, html: str) -> list[Finding]:
+    def _check_open_graph(self, html: str, ctx: ScanContext) -> list[Finding]:
         findings: list[Finding] = []
         og_tags = {"og:title": None, "og:description": None, "og:image": None, "og:url": None}
         for tag in og_tags:
@@ -185,14 +187,15 @@ class SEOAnalyzer(BaseAnalyzer):
 
         missing = [k for k, v in og_tags.items() if not v]
         if missing:
+            is_ent = ctx.config.get("enterprise_mode", False)
             findings.append(
                 Finding(
                     name="missing-og",
                     title="Missing Open Graph Tags",
                     description=f"Missing: {', '.join(missing)}",
                     passed=False,
-                    severity=Severity.MEDIUM,
-                    score_modifier=-5,
+                    severity=Severity.LOW if is_ent else Severity.MEDIUM,
+                    score_modifier=0 if is_ent else -5,
                     data={"missing": missing, "present": {k: v for k, v in og_tags.items() if v}},
                     recommendation="Add all Open Graph tags for proper social media previews.",
                 )
