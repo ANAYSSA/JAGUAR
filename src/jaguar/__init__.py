@@ -7,6 +7,6 @@ detection, performance analysis, UX analysis, and comprehensive reporting
 into a single CLI application.
 """
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 __author__ = "anayssa"
 __app_name__ = "JAGUAR"

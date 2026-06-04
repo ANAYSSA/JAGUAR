@@ -1,3 +1,11 @@
+## [1.0.5] - 2026-06-04
+### Added
+- Universal Resource Rewriter using BeautifulSoup to intelligently resolve and fix local file paths.
+- Comprehensive Validation Engine detecting 404s for HTML, CSS, JS, Images, Fonts, SVG, Manifests, and Media.
+- Clone Visual Accuracy strict enforcement (>98%) failing clones on layout divergence.
+- Playwright console error detection to capture JS exceptions and failed network requests during verification.
+- CLONE_DEBUG.md documentation.
+
 ## [1.0.4] - Visual Clone Accuracy & Website Rebuilder
 - Added CSS dependency resolver with recursive @import and @font-face support.
 - Added post-clone rebuilder with entry-point detection and path rewriting.

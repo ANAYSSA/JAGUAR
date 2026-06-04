@@ -207,6 +207,28 @@ class ClonerEngine:
                 comparator = VisualCompare(target_dir)
                 self.visual_result = await comparator.compare(self.base_url)
                 logger.info("Visual accuracy: %.1f%%", self.visual_result.accuracy)
+
+                failed = False
+                if self.visual_result.accuracy < 98.0:
+                    logger.error("Clone FAILED: Visual accuracy %.1f%% is below 98.0%% threshold.", self.visual_result.accuracy)
+                    failed = True
+
+                if self.visual_result.console_errors:
+                    logger.error("Clone FAILED: Browser console contains resource failures (%d errors).", len(self.visual_result.console_errors))
+                    for err in self.visual_result.console_errors:
+                        logger.error("Browser Error: %s", err)
+                    failed = True
+
+                # Append visual report to CLONE_REPORT.md
+                report_path = target_dir / "CLONE_REPORT.md"
+                with report_path.open("a", encoding="utf-8") as f:
+                    f.write("\n## Visual Verification\n")
+                    f.write(self.visual_result.summary() + "\n")
+                    if failed:
+                        f.write("\n**STATUS: FAILED**\n")
+                    else:
+                        f.write("\n**STATUS: PASSED**\n")
+
             except Exception as e:
                 logger.warning("Visual comparison failed: %s", e)
 

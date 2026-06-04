@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import struct
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger("jaguar.cloner.visual_compare")
@@ -27,13 +27,17 @@ class VisualComparisonResult:
     clone_screenshot: str = ""
     diff_pixels: int = 0
     total_pixels: int = 0
+    console_errors: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        return (
+        s = (
             f"Visual Accuracy: {self.accuracy:.1f}%\n"
             f"Total Pixels: {self.total_pixels}\n"
             f"Different Pixels: {self.diff_pixels}"
         )
+        if self.console_errors:
+            s += f"\nBrowser Console Errors: {len(self.console_errors)}"
+        return s
 
 
 class VisualCompare:
@@ -106,6 +110,26 @@ class VisualCompare:
             try:
                 logger.info("Capturing screenshot of clone on port %d", local_port)
                 page = await browser.new_page()
+
+                from playwright.async_api import ConsoleMessage, Error, Request
+                
+                def handle_console(msg: ConsoleMessage) -> None:
+                    if msg.type in ("error", "warning") and "Failed to load resource" in msg.text:
+                        result.console_errors.append(msg.text)
+                    elif msg.type == "error":
+                        result.console_errors.append(f"Console error: {msg.text}")
+
+                def handle_pageerror(err: Error) -> None:
+                    result.console_errors.append(f"JS Exception: {err}")
+
+                def handle_requestfailed(req: Request) -> None:
+                    if req.failure:
+                        result.console_errors.append(f"Request failed: {req.url} ({req.failure})")
+
+                page.on("console", handle_console)
+                page.on("pageerror", handle_pageerror)
+                page.on("requestfailed", handle_requestfailed)
+
                 try:
                     await browser.navigate_and_wait(
                         page, f"http://localhost:{local_port}"

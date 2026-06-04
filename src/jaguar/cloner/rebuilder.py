@@ -136,53 +136,90 @@ class Rebuilder:
         logger.info("Created redirect: index.html → %s", target)
 
     def _rewrite_html(self, html_path: Path) -> bool:
-        """Rewrite absolute/root-relative URLs in an HTML file to local paths."""
+        """Rewrite all relative URLs in an HTML file to local paths using BeautifulSoup."""
         try:
             content = html_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             return False
 
-        original = content
-        origin = f"{self.base_parsed.scheme}://{self.base_parsed.netloc}"
+        from bs4 import BeautifulSoup, Tag
+        soup = BeautifulSoup(content, "lxml")
+        changed = False
 
-        # Replace absolute URLs with the same origin to relative paths
-        # e.g., https://example.com/assets/style.css → assets/style.css
-        def rewrite_absolute(match: re.Match[str]) -> str:
-            attr = match.group(1)
-            quote = match.group(2)
-            url = match.group(3)
+        def fix_attr(tag: Tag, attr: str) -> None:
+            nonlocal changed
+            val_raw = tag.get(attr)
+            if not val_raw:
+                return
+            val = val_raw[0] if isinstance(val_raw, list) else str(val_raw)
+            if val.startswith(("data:", "http://", "https://", "javascript:", "mailto:", "tel:", "#")):
+                return
 
-            if url.startswith(origin):
-                path = url[len(origin):]
-                local = path.lstrip("/")
-                if not local:
-                    local = "index.html"
-                # Calculate relative path from this HTML file
-                rel = self._relative_from(html_path, self.clone_dir / local)
-                return f'{attr}={quote}{rel}{quote}'
-            return match.group(0)
-
-        # Match src="...", href="...", content="..." with absolute URLs
-        pattern = r'(src|href|content|action|poster)=(["\'])(' + re.escape(origin) + r'[^"\']*)\2'
-        content = re.sub(pattern, rewrite_absolute, content)
-
-        # Replace root-relative URLs (starting with /) but not //
-        def rewrite_root_relative(match: re.Match[str]) -> str:
-            attr = match.group(1)
-            quote = match.group(2)
-            path = match.group(3)
-
-            local = path.lstrip("/")
+            # Try to find the file locally
+            local = val.split("?")[0].split("#")[0].lstrip("/")
             if not local:
                 local = "index.html"
-            rel = self._relative_from(html_path, self.clone_dir / local)
-            return f'{attr}={quote}{rel}{quote}'
 
-        pattern = r'(src|href|action|poster)=(["\'])(\/(?!\/)[^"\']*)\2'
-        content = re.sub(pattern, rewrite_root_relative, content)
+            target_path = self.clone_dir / local
+            if not target_path.exists():
+                # Maybe it is relative to the html file's directory?
+                target_path = (html_path.parent / val).resolve()
 
-        if content != original:
-            html_path.write_text(content, encoding="utf-8")
+            if target_path.exists():
+                rel = self._relative_from(html_path, target_path)
+                if rel != val:
+                    tag[attr] = rel
+                    changed = True
+
+        for tag in soup.find_all("a", href=True):
+            fix_attr(tag, "href")
+        for tag in soup.find_all("link", href=True):
+            fix_attr(tag, "href")
+        for tag in soup.find_all("script", src=True):
+            fix_attr(tag, "src")
+        for tag in soup.find_all("img", src=True):
+            fix_attr(tag, "src")
+        for tag in soup.find_all(["source", "video", "audio", "embed", "object", "form"]):
+            if tag.has_attr("src"):
+                fix_attr(tag, "src")
+            if tag.has_attr("data"):
+                fix_attr(tag, "data")
+            if tag.has_attr("action"):
+                fix_attr(tag, "action")
+            if tag.has_attr("poster"):
+                fix_attr(tag, "poster")
+
+        # Fix srcset
+        for tag in soup.find_all(["img", "source"], srcset=True):
+            srcset = tag["srcset"]
+            parts = []
+            for entry in srcset.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                tokens = entry.split()
+                if tokens:
+                    val = tokens[0]
+                    if not val.startswith(("data:", "http://", "https://", "javascript:")):
+                        local = val.split("?")[0].split("#")[0].lstrip("/")
+                        target_path = self.clone_dir / local
+                        if not target_path.exists():
+                            target_path = (html_path.parent / val).resolve()
+                        if target_path.exists():
+                            tokens[0] = self._relative_from(html_path, target_path)
+                            changed = True
+                parts.append(" ".join(tokens))
+            if changed:
+                tag["srcset"] = ", ".join(parts)
+
+        # Fix meta
+        for tag in soup.find_all("meta", content=True):
+            prop = tag.get("property", "") or tag.get("name", "")
+            if "image" in prop.lower() or "url" in prop.lower():
+                fix_attr(tag, "content")
+
+        if changed:
+            html_path.write_text(str(soup), encoding="utf-8")
             return True
         return False
 

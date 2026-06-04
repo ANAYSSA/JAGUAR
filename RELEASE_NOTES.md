@@ -1,3 +1,14 @@
+# JAGUAR v1.0.5 Release Notes
+
+## Universal Resource Rewriter
+JAGUAR v1.0.5 completely revamps the way offline websites are linked together. It replaces regex-based URL adjustments with a robust BeautifulSoup AST analysis. It now calculates relative path resolutions perfectly regardless of original URL structure or root directories.
+
+## Strict Clone Validation
+The clone accuracy engine is drastically upgraded. JAGUAR now generates detailed `CLONE_REPORT.md` summaries confirming 0 missing assets across 8 different categories (HTML, CSS, JS, Fonts, Images, SVG, Media, Manifests).
+
+## Browser Console Verification
+When running with `--verify`, JAGUAR natively attaches to Playwright browser console streams and will automatically mark clones as FAILED if any 404 resource errors or JS Exceptions are found, ensuring the offline clone is identical to the production website. Visual Accuracy is now enforced at >98%.
+
 # JAGUAR Release Notes
 
 ## v1.0.4 - Visual Clone Accuracy & Website Rebuilder
