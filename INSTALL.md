@@ -49,6 +49,18 @@ Once installed, verify the premium CLI banner loads and the version is displayed
 jaguar
 ```
 
+## Configuration
+
+JAGUAR stores cloned websites in `D:\JAGUAR\jaguar-clones` by default. You can customize this:
+
+```bash
+# Set globally via CLI
+jaguar config set clone_dir "C:\custom\clones"
+
+# Or via environment variable
+export JAGUAR_CLONE_DIR="C:\custom\clones"
+```
+
 Run your first scan:
 ```bash
 jaguar scan https://example.com

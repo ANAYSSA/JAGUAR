@@ -22,6 +22,16 @@ pip install .[browser]
 jaguar doctor --fix
 ```
 
+### Configuration
+JAGUAR supports centralized configuration. You can change where clones are stored globally:
+```bash
+# Set a custom clone directory
+jaguar config set clone_dir "E:\my-clones"
+
+# Or use environment variables
+export JAGUAR_CLONE_DIR="E:\my-clones"
+```
+
 ## 🛠️ Usage
 
 ```bash
@@ -41,7 +51,7 @@ jaguar clone https://nextjs.org --spa --serve
 jaguar clone https://example.com --verify
 
 # Serve a previously cloned application locally
-jaguar serve ./jaguar-clones/nextjs.org
+jaguar serve nextjs.org
 ```
 
 ## 📖 Documentation

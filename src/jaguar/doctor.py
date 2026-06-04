@@ -91,6 +91,22 @@ def get_network_status() -> dict[str, Any]:
     except Exception:
         return {"status": "FAIL", "value": "Offline", "message": "No internet connection.", "fix": "Check network connection."}
 
+def get_clone_status() -> dict[str, Any]:
+    from jaguar.config import load_config
+    cfg = load_config()
+    clone_dir = cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones")
+
+    import os
+    old_dir = os.path.expanduser("~/jaguar-clones")
+    if os.path.exists(old_dir) and os.path.isdir(old_dir) and os.listdir(old_dir):
+        return {
+            "status": "FAIL",
+            "value": clone_dir,
+            "message": f"Old clones found in {old_dir}.",
+            "fix": "migrate-clones"
+        }
+    return {"status": "INFO", "value": clone_dir, "fix": None}
+
 def run_doctor(json_mode: bool = False, fix: bool = False) -> None:
     from jaguar import __version__
     from jaguar.analyzers import get_all_analyzers
@@ -106,6 +122,7 @@ def run_doctor(json_mode: bool = False, fix: bool = False) -> None:
         "Config": get_config_status(),
         "Permissions": get_permissions_status(),
         "Network": get_network_status(),
+        "Clone Directory": get_clone_status(),
         "Analyzers": {"status": "INFO", "value": f"{len(analyzers)} Loaded", "fix": None}
     }
 
@@ -141,10 +158,28 @@ def run_doctor(json_mode: bool = False, fix: bool = False) -> None:
             if fix:
                 console.print("\nApplying automatic fixes...\n")
                 for k, f in fixes:
-                    if f and str(f).startswith("playwright install") or f.startswith("pip install") or f.startswith("python -m playwright"):  # type: ignore
+                    if f and (str(f).startswith("playwright install") or str(f).startswith("pip install") or str(f).startswith("python -m playwright")):
                         console.print(f"Running: {f}...")
                         try:
                             subprocess.run(str(f).split(), check=True)
+                            console.print(f"[green]Fixed {k}[/green]")
+                        except Exception as e:
+                            console.print(f"[red]Failed to fix {k}: {e}[/red]")
+                    elif f == "migrate-clones":
+                        console.print("Running: Migrating old clones...")
+                        try:
+                            import shutil
+
+                            from jaguar.config import load_config
+                            cfg = load_config()
+                            new_dir = cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones")
+                            old_dir = os.path.expanduser("~/jaguar-clones")
+                            os.makedirs(new_dir, exist_ok=True)
+                            for item in os.listdir(old_dir):
+                                s = os.path.join(old_dir, item)
+                                d = os.path.join(new_dir, item)
+                                if not os.path.exists(d):
+                                    shutil.move(s, d)
                             console.print(f"[green]Fixed {k}[/green]")
                         except Exception as e:
                             console.print(f"[red]Failed to fix {k}: {e}[/red]")

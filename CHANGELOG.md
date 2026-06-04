@@ -1,3 +1,12 @@
+## [1.0.6] - 2026-06-04
+### Added
+- Configurable clone storage directory via `jaguar config set clone_dir` or `JAGUAR_CLONE_DIR`.
+- Automatic migration of old clones during `jaguar doctor --fix`.
+
+### Fixed
+- Fixed `asyncio.Queue` `task_done()` bug inside `_page_worker` loop causing crashes during large clones.
+- Clone stability improvements and GitHub clone stress testing fixes.
+
 ## [1.0.5] - 2026-06-04
 ### Added
 - Universal Resource Rewriter using BeautifulSoup to intelligently resolve and fix local file paths.

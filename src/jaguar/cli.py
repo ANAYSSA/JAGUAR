@@ -187,7 +187,11 @@ def clone(url: str, depth: int, pages: int, spa: bool, serve: bool, verify: bool
 
     async def _clone() -> None:
         click.echo(f"Initializing JAGUAR Cloner for {url}...")
-        engine = ClonerEngine(max_depth=depth, max_pages=pages, render_spa=spa, verify=verify)
+        from jaguar.config import load_config
+        cfg = load_config()
+        clone_dir = cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones")
+
+        engine = ClonerEngine(max_depth=depth, max_pages=pages, render_spa=spa, verify=verify, output_dir=clone_dir)
 
         output_dir = await engine.clone(url)
         import os
@@ -235,18 +239,30 @@ def clone(url: str, depth: int, pages: int, spa: bool, serve: bool, verify: bool
 
 
 @cli.command()
-@click.argument("path", type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.argument("path", type=click.Path(exists=False, file_okay=False, dir_okay=True))
 @click.option("--port", default=8080, help="Port to serve on.")
 def serve(path: str, port: int = 8080) -> None:
     """Serve a cloned website locally."""
     import http.server
     import os
     import socketserver
+    from pathlib import Path
 
     from jaguar.cloner.server import ensure_root_index
+    from jaguar.config import load_config
+
+    cfg = load_config()
+    clone_dir = Path(cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones"))
+
+    target_path = Path(path)
+    if not target_path.exists() and (clone_dir / path).exists():
+        target_path = clone_dir / path
+    elif not target_path.exists():
+        click.echo(f"Error: Path {path} does not exist.")
+        return
 
     # Smart entry-point detection
-    entry = ensure_root_index(path)
+    entry = ensure_root_index(str(target_path))
     if entry:
         click.echo(f"Entry Point Detected:\n{entry}\n")
 
@@ -476,6 +492,34 @@ def doctor(json_mode: bool, fix: bool) -> None:
     """Diagnose JAGUAR environment and dependencies."""
     from jaguar.doctor import run_doctor
     run_doctor(json_mode, fix)
+
+
+@cli.group(name="config")
+def config_group() -> None:
+    """Manage JAGUAR configuration."""
+    pass
+
+@config_group.command(name="set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str) -> None:
+    """Set a configuration value."""
+    from jaguar.config import load_config, save_config
+    cfg = load_config()
+
+    if key == "clone_dir":
+        cfg["cloner"]["clone_dir"] = value
+    elif "." in key:
+        section, k = key.split(".", 1)
+        if section not in cfg:
+            cfg[section] = {}
+        cfg[section][k] = value
+    else:
+        click.echo(f"Error: Unknown top-level key '{key}'. Use section.key (e.g. cloner.clone_dir)")
+        return
+
+    save_config(cfg)
+    click.echo(f"Config updated: {key} = {value}")
 
 
 main = cli

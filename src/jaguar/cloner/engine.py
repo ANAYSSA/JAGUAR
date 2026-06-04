@@ -239,7 +239,6 @@ class ClonerEngine:
                 url, depth = await self._queue.get()
 
                 if len(self._visited) >= self.max_pages:
-                    self._queue.task_done()
                     continue
 
                 await self._process_page(url, depth, base_dir)

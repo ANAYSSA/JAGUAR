@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jaguar"
-version = "1.0.5"
+version = "1.0.6"
 description = "JAGUAR by anayssa — The most advanced open-source Website Intelligence Platform"
 readme = "README.md"
 license = "MIT"

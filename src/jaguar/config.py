@@ -52,6 +52,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "concurrency": 5,
         "download_assets": True,
         "respect_robots": True,
+        "clone_dir": "D:\\JAGUAR\\jaguar-clones",
     },
     "storage": {
         "database_path": "~/.jaguar/history.db",
@@ -149,6 +150,7 @@ def _apply_env_overrides(config: dict[str, Any]) -> None:
         ),
         "JAGUAR_OUTPUT_DIR": ("general", "output_dir", str),
         "JAGUAR_VERIFY_SSL": ("general", "verify_ssl", lambda x: x.lower() in ("true", "1", "yes")),
+        "JAGUAR_CLONE_DIR": ("cloner", "clone_dir", str),
     }
 
     for env_var, (section, key, converter) in env_map.items():
@@ -156,3 +158,37 @@ def _apply_env_overrides(config: dict[str, Any]) -> None:
         if value is not None:
             with contextlib.suppress(ValueError, KeyError):
                 config[section][key] = converter(value)  # type: ignore
+
+def save_config(config_data: dict[str, Any], path: Path | None = None) -> None:
+    """Save config dict to a TOML file."""
+    if path is None:
+        path = get_config_dir() / "config.toml"
+
+    def _dump_val(v: Any) -> str:
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        elif isinstance(v, (int, float)):
+            return str(v)
+        elif isinstance(v, str):
+            v_esc = v.replace("\\", "\\\\").replace('"', '\\"')
+            return f'"{v_esc}"'
+        elif isinstance(v, dict):
+            items = []
+            for ik, iv in v.items():
+                items.append(f"{ik} = {_dump_val(iv)}")
+            return "{" + ", ".join(items) + "}"
+        elif isinstance(v, list):
+            items = [_dump_val(iv) for iv in v]
+            return "[" + ", ".join(items) + "]"
+        return f'"{v}"'
+
+    lines = []
+    for section, values in config_data.items():
+        if isinstance(values, dict):
+            lines.append(f"[{section}]")
+            for k, v in values.items():
+                lines.append(f"{k} = {_dump_val(v)}")
+            lines.append("")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
