@@ -19,6 +19,8 @@ jaguar-clones/
 jaguar-reports/
 jaguar_report_*.html
 *.log
+tests/test_clones/
+tests/test_clones_debug/
 
 # Pytest / Coverage
 .pytest_cache/

@@ -332,14 +332,17 @@ def clone_doctor(path: str, deep: bool) -> None:
     asyncio.run(_doctor(path, deep))
 
 async def _doctor(path: str, deep: bool) -> None:
+    import re
     from pathlib import Path
+    from urllib.parse import urlparse
+
     import click
     click.echo(f"Running clone doctor on: {path}\n")
-    
+
     from jaguar.config import load_config
     cfg = load_config()
     clone_dir_base = Path(cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones"))
-    
+
     clone_dir = Path(path)
     if not clone_dir.exists() and (clone_dir_base / path).exists():
         clone_dir = clone_dir_base / path
@@ -347,85 +350,123 @@ async def _doctor(path: str, deep: bool) -> None:
     if not clone_dir.exists():
         click.echo("\033[91mError: Directory does not exist.\033[0m", err=True)
         return
-        
-    if not (clone_dir / "index.html").exists() and not list(clone_dir.rglob("*.html")):
+
+    from jaguar.cloner.server import detect_entry_point
+    entry = detect_entry_point(str(clone_dir))
+    if not entry and not list(clone_dir.rglob("*.html")) and not list(clone_dir.rglob("*.php")):
         click.echo(f"\033[91mCritical Error: Directory '{clone_dir}' does not appear to be a JAGUAR clone (no entry point found).\033[0m")
         click.echo("Check your serve root configuration.")
         return
-        
+
     from jaguar.cloner.validator import CloneValidator
     validator = CloneValidator(clone_dir)
-    
+
     click.echo("\033[96mRunning Static Analysis...\033[0m")
     report = validator._run_static_checks()
-    
-    broken = False
-    for name, cat in [
-        ("Broken HTML", report.html),
-        ("Broken CSS", report.css),
-        ("Broken JS", report.js),
-        ("Broken Images", report.images),
-        ("Broken Fonts", report.fonts),
-        ("Broken SVG", report.svg),
+
+    issues_found = False
+
+    # 1. Output Static missing asset failures
+    for cat_name, cat, category_type, fix_msg in [
+        ("HTML", report.html, "Route Failure", "Ensure the crawler found at least one HTML page at the target URL."),
+        ("CSS", report.css, "CSS Failure", "Verify internet connection during clone, or run clone with --spa to capture dynamic stylesheets."),
+        ("JS", report.js, "JS Failure", "Verify internet connection during clone, or run clone with --spa to capture dynamic scripts."),
+        ("Images", report.images, "Missing Asset", "Verify if this image asset exists on the origin website and is downloadable."),
+        ("Fonts", report.fonts, "Missing Asset", "Verify if this web font is referenced correctly in CSS and resides on the same origin."),
+        ("SVG", report.svg, "Missing Asset", "Verify if this SVG asset exists on the origin website and is downloadable."),
     ]:
         if cat.missing:
-            broken = True
-            click.echo(f"\033[91m{name}:\033[0m")
-            for m in cat.missing[:10]:
-                click.echo(f"  - {m}")
-            if len(cat.missing) > 10:
-                click.echo(f"  ... and {len(cat.missing)-10} more.")
-            click.echo()
-            
-    if not broken:
-        click.echo("\033[92mAll static assets are perfectly intact!\033[0m")
-        
+            issues_found = True
+            for m in cat.missing[:5]:
+                click.echo(f"\n[Category]      \033[91m{category_type}\033[0m")
+                click.echo(f" [Reason]       File missing on disk ({cat_name})")
+                click.echo(f" [URL]          {m}")
+                click.echo(f" [File]         {m.split('?')[0].split('#')[0]}")
+                click.echo(f" [Way to Fix]   {fix_msg}")
+            if len(cat.missing) > 5:
+                click.echo(f" ... and {len(cat.missing)-5} more static {cat_name} failures.")
+
+    # 2. Output Dynamic Playwright failures if requested
     if deep:
         click.echo("\n\033[96mRunning Deep Dynamic Browser Analysis (Playwright)...\033[0m")
         report = await validator._run_playwright_validation(report, "http://localhost:8080")
-        
+
         if report.rendering_error_logs:
-            click.echo(f"\n\033[91mFound {len(report.rendering_error_logs)} rendering issues:\033[0m")
+            issues_found = True
+            click.echo(f"\nFound {len(report.rendering_error_logs)} rendering issues:")
             for err in report.rendering_error_logs[:15]:
-                if "MIME type" in err or "stylesheet" in err:
-                    path = err.split("Failed to load resource:")[-1].strip() if "Failed to load resource:" in err else err
-                    click.echo(f"\n\033[93mCSS/MIME Failure:\033[0m\n{path}\nReason:\nServed with incorrect MIME type or blocked by CORB.")
-                elif "[JS Exception]" in err:
-                    click.echo(f"\n\033[91mJS Exception:\033[0m\n{err.replace('[JS Exception]', '').strip()}")
-                elif "[Network]" in err or "[HTTP" in err:
-                    click.echo(f"\n\033[95mNetwork/Route Failure:\033[0m\n{err}")
-                else:
-                    click.echo(f"\n  - {err}")
-                    
+                err_lower = err.lower()
+
+                # Classify
+                category = "Rendering Failure"
+                reason = "Unknown browser runtime error"
+                url_match = re.search(r'(https?://[^\s]+)', err)
+                url = url_match.group(1) if url_match else "N/A"
+                file_path = urlparse(url).path.lstrip("/") if url != "N/A" else "N/A"
+                fix = "Check browser logs and layout rendering."
+
+                if "mime" in err_lower or "stylesheet" in err_lower or "corb" in err_lower:
+                    category = "MIME Failure"
+                    reason = "Served with incorrect MIME type or blocked by CORB (e.g. text/html instead of text/css)"
+                    fix = "Ensure sidecar .meta.json file contains the original server's Content-Type."
+                elif "encoding" in err_lower or "decoding" in err_lower or "decode" in err_lower:
+                    category = "Content-Encoding Failure"
+                    reason = "Failed to decode response content (e.g., gzip mismatch)"
+                    fix = "Verify if .meta.json contains 'Content-Encoding: gzip' without the file being compressed on disk."
+                elif "js exception" in err_lower or "uncaught" in err_lower or "pageerror" in err_lower:
+                    category = "JS Failure"
+                    reason = "JavaScript exception thrown at runtime"
+                    fix = "Check script execution details. Some scripts require online APIs or cookies."
+                elif "network" in err_lower or "failed to load" in err_lower or "net::" in err_lower:
+                    category = "Network Failure"
+                    reason = "Network request failed to load in the browser"
+                    fix = "Verify if the server was reachable or if the request is blocked by CORS/firewalls."
+                elif "404" in err_lower:
+                    ext = Path(urlparse(url).path).suffix.lower()
+                    if ext in (".html", ".php", ""):
+                        category = "Route Failure"
+                    else:
+                        category = "Missing Asset"
+                    reason = "Server returned HTTP 404 Not Found"
+                    fix = "Check if this asset is served dynamically or if it was skipped during crawler queue."
+
+                click.echo(f"\n[Category]      \033[91m{category}\033[0m")
+                click.echo(f" [Reason]       {reason}")
+                click.echo(f" [URL]          {url}")
+                click.echo(f" [File]         {file_path}")
+                click.echo(f" [Way to Fix]   {fix}")
+                click.echo(f" [Original Log] {err}")
+
             if len(report.rendering_error_logs) > 15:
-                click.echo(f"\n  ... and {len(report.rendering_error_logs)-15} more.")
-                
-        if not report.has_rendering_errors and not broken:
-            click.echo("\n\033[92mClone Doctor found no issues! The clone is visually and structurally healthy.\033[0m")
-        else:
-            click.echo("\n\033[93mProposed Fixes:\033[0m")
-            click.echo("1. Rerun clone with --spa to ensure dynamic assets are fetched.")
-            click.echo("2. Check network connectivity during cloning.")
-            click.echo("3. Run `jaguar serve <path>` to observe real-time 404 network errors in the console.")
+                click.echo(f"\n ... and {len(report.rendering_error_logs)-15} more dynamic rendering failures.")
+
+        # Check visual accuracy
+        if report.visual_accuracy is not None and report.visual_accuracy < 90.0:
+            issues_found = True
+            click.echo("\n[Category]      \033[91mRendering Failure\033[0m")
+            click.echo(" [Reason]       Visual mismatch detected between original page and clone")
+            click.echo(f" [URL]          {entry or 'Home'}")
+            click.echo(" [File]         None")
+            click.echo(f" [Way to Fix]   Visual accuracy is {report.visual_accuracy}%. Verify fonts, CSS, and layout rendering.")
+
+    if not issues_found:
+        click.echo("\n\033[92mClone Doctor found no issues! The clone is visually and structurally healthy.\033[0m")
     else:
-        if broken:
-            click.echo("\n\033[93mProposed Fixes:\033[0m")
-            click.echo("1. Rerun clone with --spa to ensure dynamic assets are fetched.")
-            click.echo("2. Run `jaguar clone-doctor <path> --deep` to perform dynamic Playwright validation.")
+        click.echo("\n\033[93mDiagnostics complete.\033[0m")
 
 @cli.command(name="debug-clone")
 @click.argument("path")
 def debug_clone(path: str) -> None:
     """Print deep diagnostic information about a clone."""
-    import os
     from pathlib import Path
-    from jaguar.config import load_config
+
     from jaguar.cloner.server import detect_entry_point
     from jaguar.cloner.validator import CloneValidator
-    
+    from jaguar.config import load_config
+
     cfg = load_config()
     clone_dir_base = Path(cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones"))
-    
+
     clone_dir = Path(path)
     if not clone_dir.exists() and (clone_dir_base / path).exists():
         clone_dir = clone_dir_base / path
@@ -433,13 +474,13 @@ def debug_clone(path: str) -> None:
     if not clone_dir.exists():
         click.echo(f"\033[91mError: Directory '{clone_dir}' does not exist.\033[0m", err=True)
         return
-        
+
     click.echo(f"Running clone diagnostics on: {clone_dir}")
-    
+
     # 1. Entry Point
     entry = detect_entry_point(str(clone_dir))
     click.echo(f"\nSelected Entry Point: {entry or 'None Found'}")
-    
+
     # Analyze entry point reason
     if entry:
         entry_path = clone_dir / entry
@@ -450,14 +491,14 @@ def debug_clone(path: str) -> None:
             links = len(re.findall(r'href=', content)) + len(re.findall(r'src=', content))
             depth = len(Path(entry).parts)
             click.echo(f"Reason:\n  {links} links\n  {size} bytes\n  depth={depth}")
-    
+
     # 2. File counts (include .php for Moodle/WordPress clones)
     html_files = list(clone_dir.rglob("*.html"))
     php_files = list(clone_dir.rglob("*.php"))
     css_files = list(clone_dir.rglob("*.css"))
     js_files = list(clone_dir.rglob("*.js"))
     meta_files = list(clone_dir.rglob("*.meta.json"))
-    
+
     # Count assets served via .meta.json that might have CSS/JS content-types
     css_meta_count = 0
     js_meta_count = 0
@@ -472,24 +513,24 @@ def debug_clone(path: str) -> None:
                 js_meta_count += 1
         except Exception:
             pass
-    
+
     click.echo(f"\nHTML Files Found: {len(html_files)}")
     click.echo(f"PHP Files Found: {len(php_files)}")
     click.echo(f"CSS Files Found: {len(css_files)} (+ {css_meta_count} via .meta.json)")
     click.echo(f"JS Files Found: {len(js_files)} (+ {js_meta_count} via .meta.json)")
     click.echo(f"MIME Metadata (.meta.json) Count: {len(meta_files)}")
-    
+
     total_pages = len(html_files) + len(php_files)
     total_css = len(css_files) + css_meta_count
     total_js = len(js_files) + js_meta_count
-    
+
     if total_pages == 0:
         click.echo("\033[91mWarning: No HTML or PHP files found. Clone may be empty.\033[0m")
     if total_css == 0:
         click.echo("\033[93mWarning: No CSS files found. Clone may appear unstyled.\033[0m")
     if total_js == 0:
         click.echo("\033[93mWarning: No JS files found. Clone may lack interactivity.\033[0m")
-    
+
     # List actual CSS and JS paths (up to 10)
     if css_files:
         click.echo("\nCSS files on disk:")
@@ -499,19 +540,19 @@ def debug_clone(path: str) -> None:
         click.echo("\nJS files on disk:")
         for f in js_files[:10]:
             click.echo(f"  {f.relative_to(clone_dir)}")
-    
+
     # 3. Validator parse
     validator = CloneValidator(clone_dir)
     report = validator._run_static_checks()
-    
+
     total_assets = report.images.total + report.fonts.total + report.svg.total + report.media.total
     resolved_assets = report.images.resolved + report.fonts.resolved + report.svg.resolved + report.media.resolved
-    
+
     click.echo(f"\nValidator Detected Links: {report.links.total}")
     click.echo(f"Validator Detected CSS: {report.css.total} (resolved: {report.css.resolved})")
     click.echo(f"Validator Detected JS: {report.js.total} (resolved: {report.js.resolved})")
     click.echo(f"Validator Detected Assets: {total_assets} (resolved: {resolved_assets})")
-    
+
     click.echo("\nRoute Mappings:")
     click.echo(f"/ -> {entry or '404 Offline Placeholder'}")
     click.echo("/* -> Offline Placeholder Fallback (SPA routing enabled)")
@@ -525,8 +566,9 @@ def serve(path: str, port: int) -> None:
     """Serve a cloned website locally with SPA routing support."""
     import os
     from pathlib import Path
-    from jaguar.config import load_config
+
     from jaguar.cloner.server import CloneServer
+    from jaguar.config import load_config
 
     try:
         cfg = load_config()
@@ -545,26 +587,26 @@ def serve(path: str, port: int) -> None:
         elif not target_path.exists():
             click.echo(f"Error: Path {path} does not exist.")
             return
-            
+
         # Serve Verification Checks (Reject root/user directories)
         from jaguar.cloner.server import detect_entry_point
         entry = detect_entry_point(str(target_path))
-        
+
         if not entry and not list(target_path.rglob("*.html")) and not list(target_path.rglob("*.php")):
             click.echo(f"\033[91mCritical Error: Path {os.path.abspath(target_path)} does not appear to be a valid JAGUAR clone (no HTML or PHP files found).\033[0m")
             click.echo("Refusing to serve directory to prevent exposing user files.")
             return
 
         click.echo("\n\033[96mRunning Pre-Serve Health Check...\033[0m")
-        
+
         html_count = sum(1 for _ in target_path.rglob("*.html"))
         php_count = sum(1 for _ in target_path.rglob("*.php"))
         css_count = sum(1 for _ in target_path.rglob("*.css"))
         js_count = sum(1 for _ in target_path.rglob("*.js"))
         meta_count = sum(1 for _ in target_path.rglob("*.meta.json"))
-        
+
         page_count = html_count + php_count
-            
+
         click.echo(f"Clone Root: {target_path}")
         click.echo(f"Entry Point: {entry or 'None Found'}")
         click.echo(f"HTML Files Found: {html_count}")
@@ -572,24 +614,24 @@ def serve(path: str, port: int) -> None:
         click.echo(f"CSS Files Found: {css_count}")
         click.echo(f"JS Files Found: {js_count}")
         click.echo(f"MIME Metadata Count: {meta_count}")
-        
+
         if page_count == 0 or css_count == 0 or js_count == 0:
             click.echo("\033[93mWarning: Some asset counts are zero. The clone might be incomplete or missing stylesheets.\033[0m")
 
         from jaguar.cloner.validator import CloneValidator
         validator = CloneValidator(target_path)
         report = validator._run_static_checks(timeout=5)
-        
+
         click.echo("\nServe Health:")
         click.echo(f"  HTML:   {'\033[92mOK' if not report.html.missing else '\033[91mBroken'} ({report.html.resolved}/{report.html.total})\033[0m")
         click.echo(f"  CSS:    {'\033[92mOK' if not report.css.missing else '\033[91mBroken'} ({report.css.resolved}/{report.css.total})\033[0m")
         click.echo(f"  JS:     {'\033[92mOK' if not report.js.missing else '\033[91mBroken'} ({report.js.resolved}/{report.js.total})\033[0m")
-        
+
         total_assets = report.images.total + report.fonts.total + report.svg.total + report.media.total
         resolved_assets = report.images.resolved + report.fonts.resolved + report.svg.resolved + report.media.resolved
         assets_status = '\033[92mOK' if (total_assets == 0 or resolved_assets == total_assets) else '\033[91mBroken'
         click.echo(f"  Assets: {assets_status} ({resolved_assets}/{total_assets})\033[0m\n")
-        
+
         click.echo(f"Assets Found: {total_assets}")
 
         server = CloneServer(str(target_path), port=port)

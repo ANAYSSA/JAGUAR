@@ -52,7 +52,9 @@ class SPARenderer:
             raise
         finally:
             if page:
-                await page.close()
+                import asyncio
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await asyncio.shield(page.close())
 
     async def _wait_for_framework(self, page: Any) -> None:
         """Wait for common JS frameworks to finish initial rendering."""

@@ -14,7 +14,7 @@ import struct
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from playwright.async_api import ConsoleMessage, Error, Request
@@ -51,7 +51,7 @@ class VisualCompare:
         self.clone_dir = clone_dir
 
     async def compare(
-        self, original_url: str, local_port: int = 8090
+        self, original_url: str, local_port: int = 8090, browser_manager: Any = None
     ) -> VisualComparisonResult:
         """
         Capture screenshots of original and clone, compare them.
@@ -77,10 +77,14 @@ class VisualCompare:
         original_path = screenshots_dir / "original.png"
         clone_path = screenshots_dir / "clone.png"
 
-        browser = BrowserManager(headless=True)
+        browser = browser_manager
+        should_close_browser = False
 
         try:
-            await browser.start()
+            if not browser:
+                browser = BrowserManager(headless=True)
+                await browser.start()
+                should_close_browser = True
 
             # 1. Screenshot original
             logger.info("Capturing screenshot of original: %s", original_url)
@@ -93,8 +97,15 @@ class VisualCompare:
 
             # 2. Start temp server and screenshot clone
             import http.server
+            import socket
             import socketserver
             import threading
+
+            # Dynamically allocate a free port
+            sock = socket.socket()
+            sock.bind(('', 0))
+            port = sock.getsockname()[1]
+            sock.close()
 
             _clone_dir = str(self.clone_dir)
 
@@ -107,12 +118,12 @@ class VisualCompare:
 
             socketserver.ThreadingTCPServer.allow_reuse_address = True
 
-            server = socketserver.ThreadingTCPServer(("127.0.0.1", local_port), Handler)
+            server = socketserver.ThreadingTCPServer(("127.0.0.1", port), Handler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
 
             try:
-                logger.info("Capturing screenshot of clone on port %d", local_port)
+                logger.info("Capturing screenshot of clone on port %d", port)
                 page = await browser.new_page()
 
                 def handle_console(msg: ConsoleMessage) -> None:
@@ -134,21 +145,25 @@ class VisualCompare:
 
                 try:
                     await browser.navigate_and_wait(
-                        page, f"http://localhost:{local_port}"
+                        page, f"http://localhost:{port}"
                     )
                     await page.screenshot(path=str(clone_path), full_page=True)
                 finally:
                     await page.close()
             finally:
-                server.shutdown()
-                server.server_close()
+                try:
+                    server.server_close()
+                except Exception:
+                    pass
 
             # 3. Compare screenshots
             if original_path.exists() and clone_path.exists():
+                logger.info("[DEBUG VC] Both screenshots exist. Calling _compare_images()")
                 result = self._compare_images(
                     original_path.read_bytes(),
                     clone_path.read_bytes(),
                 )
+                logger.info("[DEBUG VC] _compare_images() returned")
                 result.original_screenshot = str(original_path)
                 result.clone_screenshot = str(clone_path)
 
@@ -156,7 +171,8 @@ class VisualCompare:
             logger.error("Visual comparison failed: %s", e)
             result.accuracy = -1.0
         finally:
-            await browser.close()
+            if browser and should_close_browser:
+                await browser.close()
 
         return result
 
@@ -167,7 +183,9 @@ class VisualCompare:
         result = VisualComparisonResult()
 
         try:
+            logger.info("[DEBUG VC] Calling _decode_png_pixels on image A")
             pixels_a = self._decode_png_pixels(img_a_bytes)
+            logger.info("[DEBUG VC] Calling _decode_png_pixels on image B")
             pixels_b = self._decode_png_pixels(img_b_bytes)
 
             if pixels_a is None or pixels_b is None:

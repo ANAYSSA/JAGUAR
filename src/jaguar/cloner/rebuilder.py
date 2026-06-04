@@ -12,6 +12,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 logger = logging.getLogger("jaguar.cloner.rebuilder")
@@ -26,6 +27,59 @@ SPA_MARKERS = [
     'id="app"',
     'id="root"',
 ]
+
+
+def classify_file(path: Path) -> str:
+    """Classify file as 'html', 'css', 'js', 'json', or 'unknown' based on metadata, extension, and content."""
+    if not path.is_file():
+        return "unknown"
+
+    # 1. Check sidecar metadata
+    meta_path = path.with_name(path.name + ".meta.json")
+    if meta_path.exists():
+        try:
+            import json as _json
+            meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+            ct = meta.get("Content-Type", "").lower()
+            if "text/html" in ct:
+                return "html"
+            if "text/css" in ct:
+                return "css"
+            if "javascript" in ct or "ecmascript" in ct:
+                return "js"
+            if "json" in ct:
+                return "json"
+        except Exception:
+            pass
+
+    # 2. Check extension/filename suffixes
+    ext = path.suffix.lower()
+    if ext in (".html", ".htm"):
+        return "html"
+    if ext == ".css" or path.name == "styles.php" or path.name == "theme.php":
+        return "css"
+    if ext == ".js" or path.name == "javascript.php" or path.name == "yui_combo.php":
+        return "js"
+    if ext in (".json", ".webmanifest"):
+        return "json"
+    if ext == ".php":
+        return "html"
+
+    # 3. Sniff content
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(1024)
+        text = chunk.decode("utf-8", errors="ignore").strip().lower()
+        if text.startswith("<!doctype html") or "<html" in text or "<body" in text:
+            return "html"
+        if "import " in text or "const " in text or "let " in text or "function" in text or text.startswith("(function"):
+            return "js"
+        if "{" in text and ("body {" in text or "html {" in text or "@import" in text or "margin:" in text):
+            return "css"
+    except Exception:
+        pass
+
+    return "unknown"
 
 
 class Rebuilder:
@@ -54,8 +108,30 @@ class Rebuilder:
         else:
             summary["redirect_created"] = False
 
-        # Phase 3: Rewrite HTML files
-        html_files = list(self.clone_dir.rglob("*.html"))
+        # Classify files dynamically
+        html_files = []
+        css_files = []
+        js_files = []
+        json_files = []
+
+        for p in self.clone_dir.rglob("*"):
+            if p.is_file() and not p.name.endswith(".meta.json") and ".jaguar-screenshots" not in p.parts and ".git" not in p.parts:
+                t = classify_file(p)
+                if t == "html":
+                    html_files.append(p)
+                elif t == "css":
+                    css_files.append(p)
+                elif t == "js":
+                    js_files.append(p)
+                elif t == "json":
+                    json_files.append(p)
+
+        summary["files_html_detected"] = len(html_files)
+        summary["files_css_detected"] = len(css_files)
+        summary["files_js_detected"] = len(js_files)
+        summary["files_json_detected"] = len(json_files)
+
+        # Phase 3: Rewrite HTML/PHP files
         html_fixed = 0
         for html_file in html_files:
             if self._rewrite_html(html_file):
@@ -68,11 +144,11 @@ class Rebuilder:
             self.is_spa = self._detect_spa(root_index)
         summary["is_spa"] = self.is_spa
 
-        # Phase 5: Fix manifest files
+        # Phase 5: Fix manifest files (which are JSON)
         manifest_fixed = self._fix_manifests()
         summary["manifests_fixed"] = manifest_fixed
 
-        # Phase 6: Fix inline styles in HTML
+        # Phase 6: Fix inline styles in HTML/PHP
         inline_fixed = 0
         for html_file in html_files:
             if self._fix_inline_styles(html_file):
@@ -80,12 +156,25 @@ class Rebuilder:
         summary["inline_styles_fixed"] = inline_fixed
 
         # Phase 7: Fix CSS files
-        css_files = list(self.clone_dir.rglob("*.css"))
         css_fixed = 0
         for css_file in css_files:
             if self._fix_css_file(css_file):
                 css_fixed += 1
         summary["css_files_fixed"] = css_fixed
+
+        # Phase 8: Fix JS files
+        js_fixed = 0
+        for js_file in js_files:
+            if self._fix_js_file(js_file):
+                js_fixed += 1
+        summary["js_files_fixed"] = js_fixed
+
+        # Phase 9: Fix JSON files
+        json_fixed = 0
+        for json_file in json_files:
+            if self._fix_json_file(json_file):
+                json_fixed += 1
+        summary["json_files_fixed"] = json_fixed
 
         logger.info("Rebuild complete: %s", summary)
         return summary
@@ -154,35 +243,66 @@ class Rebuilder:
         soup = BeautifulSoup(content, "lxml")
         changed = False
 
+        origin = f"{self.base_parsed.scheme}://{self.base_parsed.netloc}"
+        host = self.base_parsed.netloc
+
         def fix_attr(tag: Tag, attr: str) -> None:
             nonlocal changed
             val_raw = tag.get(attr)
             if not val_raw:
                 return
             val = val_raw[0] if isinstance(val_raw, list) else str(val_raw)
-            if val.startswith(("data:", "http://", "https://", "javascript:", "mailto:", "tel:", "#")):
+            if val.startswith(("data:", "javascript:", "mailto:", "tel:", "#")):
                 return
 
-            from urllib.parse import unquote
-            # Try to find the file locally
-            local = unquote(val.split("?")[0].split("#")[0]).lstrip("/")
-            if not local:
-                local = "index.html"
+            from urllib.parse import unquote, urlparse
 
-            target_path = self.clone_dir / local
+            # Recursively decode encoded / double-encoded URLs
+            val_decoded = val
+            for _ in range(3):
+                decoded = unquote(val_decoded)
+                if decoded == val_decoded:
+                    break
+                val_decoded = decoded
+
+            is_same_site = False
+            path_part = ""
+            if val_decoded.startswith((origin, f"http://{host}", f"https://{host}")):
+                is_same_site = True
+                path_part = urlparse(val_decoded).path
+            elif val_decoded.startswith("//" + host):
+                is_same_site = True
+                path_part = urlparse("https:" + val_decoded).path
+            elif not val_decoded.startswith(("http://", "https://", "//")):
+                is_same_site = True
+                path_part = val_decoded.split("?")[0].split("#")[0]
+
+            if not is_same_site:
+                return
+
+            # Clean and split query/fragments
+            clean_path = path_part.split("?")[0].split("#")[0].lstrip("/")
+            if not clean_path:
+                clean_path = "index.html"
+
+            # Check if file exists relative to clone root
+            target_path = self.clone_dir / clean_path
             if not target_path.exists():
-                # Maybe it is relative to the html file's directory?
-                target_path = (html_path.parent / unquote(val)).resolve()
+                # Try relative to the HTML file
+                try:
+                    target_path = (html_path.parent / clean_path).resolve()
+                except Exception:
+                    pass
 
             if not target_path.exists():
-                # Repair broken path by searching the directory
-                filename = val.split("/")[-1].split("?")[0].split("#")[0]
+                # Search directory for file with the same name
+                filename = clean_path.split("/")[-1]
                 if filename:
                     found = self._find_asset_in_clone(filename)
                     if found:
                         target_path = found
 
-            if target_path.exists():
+            if target_path.exists() and target_path.is_file():
                 rel = self._relative_from(html_path, target_path)
                 if rel != val:
                     tag[attr] = rel
@@ -217,12 +337,36 @@ class Rebuilder:
                 tokens = entry.split()
                 if tokens:
                     val = tokens[0]
-                    if not val.startswith(("data:", "http://", "https://", "javascript:")):
-                        local = val.split("?")[0].split("#")[0].lstrip("/")
-                        target_path = self.clone_dir / local
+                    # Recursively decode
+                    from urllib.parse import unquote, urlparse
+                    val_decoded = val
+                    for _ in range(3):
+                        decoded = unquote(val_decoded)
+                        if decoded == val_decoded:
+                            break
+                        val_decoded = decoded
+
+                    is_same_site = False
+                    path_part = ""
+                    if val_decoded.startswith((origin, f"http://{host}", f"https://{host}")):
+                        is_same_site = True
+                        path_part = urlparse(val_decoded).path
+                    elif val_decoded.startswith("//" + host):
+                        is_same_site = True
+                        path_part = urlparse("https:" + val_decoded).path
+                    elif not val_decoded.startswith(("http://", "https://", "//", "javascript:", "mailto:", "tel:", "data:", "#")):
+                        is_same_site = True
+                        path_part = val_decoded.split("?")[0].split("#")[0]
+
+                    if is_same_site:
+                        clean_path = path_part.lstrip("/")
+                        target_path = self.clone_dir / clean_path
                         if not target_path.exists():
-                            target_path = (html_path.parent / val).resolve()
-                        if target_path.exists():
+                            try:
+                                target_path = (html_path.parent / clean_path).resolve()
+                            except Exception:
+                                pass
+                        if target_path.exists() and target_path.is_file():
                             tokens[0] = self._relative_from(html_path, target_path)
                             changed = True
                 parts.append(" ".join(tokens))
@@ -234,6 +378,55 @@ class Rebuilder:
             prop = tag.get("property", "") or tag.get("name", "")
             if "image" in prop.lower() or "url" in prop.lower():
                 fix_attr(tag, "content")
+
+        # Fix import maps
+        for tag in soup.find_all("script", type="importmap"):
+            try:
+                import json as _json
+                map_data = _json.loads(tag.string or "{}")
+                map_changed = False
+
+                for section in ["imports", "scopes"]:
+                    if section in map_data and isinstance(map_data[section], dict):
+                        for k, v in map_data[section].items():
+                            if isinstance(v, str):
+                                from urllib.parse import unquote, urlparse
+                                val_decoded = v
+                                for _ in range(3):
+                                    decoded = unquote(val_decoded)
+                                    if decoded == val_decoded:
+                                        break
+                                    val_decoded = decoded
+
+                                is_same = False
+                                path_part = ""
+                                if val_decoded.startswith((origin, f"http://{host}", f"https://{host}")):
+                                    is_same = True
+                                    path_part = urlparse(val_decoded).path
+                                elif val_decoded.startswith("//" + host):
+                                    is_same = True
+                                    path_part = urlparse("https:" + val_decoded).path
+                                elif not val_decoded.startswith(("http://", "https://", "//")):
+                                    is_same = True
+                                    path_part = val_decoded.split("?")[0].split("#")[0]
+
+                                if is_same:
+                                    clean_path = path_part.lstrip("/")
+                                    local_path = self.clone_dir / clean_path
+                                    if not local_path.exists():
+                                        try:
+                                            local_path = (html_path.parent / clean_path).resolve()
+                                        except Exception:
+                                            pass
+                                    if local_path.exists() and local_path.is_file():
+                                        rel = self._relative_from(html_path, local_path)
+                                        map_data[section][k] = rel
+                                        map_changed = True
+                if map_changed:
+                    tag.string = _json.dumps(map_data, indent=2)
+                    changed = True
+            except Exception as e:
+                logger.error("Failed to parse importmap: %s", e)
 
         if changed:
             html_path.write_text(str(soup), encoding="utf-8")
@@ -387,3 +580,110 @@ class Rebuilder:
             ups = [".."] * (len(from_parts) - common)
             downs = list(to_parts[common:])
             return "/".join(ups + downs)
+
+    def _fix_js_file(self, js_path: Path) -> bool:
+        try:
+            content = js_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        original = content
+        origin = f"{self.base_parsed.scheme}://{self.base_parsed.netloc}"
+        host = self.base_parsed.netloc
+
+        def replace_js_url(match: re.Match[str]) -> str:
+            quote = match.group(1)
+            url = match.group(2).strip()
+
+            if url.startswith(("javascript:", "mailto:", "tel:", "data:", "#")):
+                return match.group(0)
+
+            is_match = False
+            path_part = ""
+            if url.startswith((origin, f"http://{host}", f"https://{host}")):
+                is_match = True
+                path_part = urlparse(url).path
+            elif url.startswith("//" + host):
+                is_match = True
+                path_part = urlparse("https:" + url).path
+            elif url.startswith("/") and not url.startswith("//"):
+                is_match = True
+                path_part = url
+
+            if is_match:
+                from urllib.parse import unquote
+                decoded_path = unquote(unquote(path_part.split("?")[0].split("#")[0])).lstrip("/")
+                local_path = self.clone_dir / decoded_path
+
+                if local_path.exists() and local_path.is_file():
+                    rel = self._relative_from(js_path, local_path)
+                    return f"{quote}{rel}{quote}"
+
+            return match.group(0)
+
+        pattern = r"(['\"`])(.*?)\1"
+        content = re.sub(pattern, replace_js_url, content)
+
+        if content != original:
+            js_path.write_text(content, encoding="utf-8")
+            return True
+        return False
+
+    def _fix_json_file(self, json_path: Path) -> bool:
+        try:
+            content = json_path.read_text(encoding="utf-8", errors="replace")
+            data = json.loads(content)
+        except Exception:
+            return False
+
+        changed = False
+        origin = f"{self.base_parsed.scheme}://{self.base_parsed.netloc}"
+        host = self.base_parsed.netloc
+
+        def walk(node: Any) -> Any:
+            nonlocal changed
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    node[k] = walk(v)
+                return node
+            elif isinstance(node, list):
+                for i, v in enumerate(node):
+                    node[i] = walk(v)
+                return node
+            elif isinstance(node, str):
+                url = node.strip()
+                if url.startswith(("javascript:", "mailto:", "tel:", "data:", "#")):
+                    return node
+
+                is_match = False
+                path_part = ""
+                if url.startswith((origin, f"http://{host}", f"https://{host}")):
+                    is_match = True
+                    path_part = urlparse(url).path
+                elif url.startswith("//" + host):
+                    is_match = True
+                    path_part = urlparse("https:" + url).path
+                elif url.startswith("/") and not url.startswith("//"):
+                    is_match = True
+                    path_part = url
+
+                if is_match:
+                    from urllib.parse import unquote
+                    decoded_path = unquote(unquote(path_part.split("?")[0].split("#")[0])).lstrip("/")
+                    local_path = self.clone_dir / decoded_path
+                    if not local_path.exists():
+                        try:
+                            local_path = (json_path.parent / decoded_path).resolve()
+                        except Exception:
+                            pass
+                    if local_path.exists() and local_path.is_file():
+                        rel = self._relative_from(json_path, local_path)
+                        changed = True
+                        return rel
+            return node
+
+        data = walk(data)
+        if changed:
+            json_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            return True
+        return False

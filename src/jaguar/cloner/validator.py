@@ -12,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bs4 import BeautifulSoup
 
@@ -69,23 +69,36 @@ class CloneReport:
                 score = 0.0
             else:
                 score = sum((c.resolved / c.total) * 100 for c in non_empty) / len(non_empty)
-                
+
+        # Penalize for missing files in categories
+        total_missing = self.total_missing
+        if total_missing > 0:
+            score -= min(40.0, total_missing * 2.0)
+
         # Hard limits based on categories
-        if self.has_rendering_errors:
-            score = min(score, 95.0)
-            
         if self.css.total > 0 and self.css.missing:
             score = min(score, 80.0)
-            
+
         if self.js.total > 0 and self.js.missing:
             score = min(score, 80.0)
-            
+
+        if self.has_rendering_errors or self.rendering_error_logs:
+            error_count = len(self.rendering_error_logs) or 1
+            score = min(score, 90.0)
+            score -= min(30.0, error_count * 1.5)
+
         if self.visual_accuracy is not None:
+            if self.visual_accuracy < 100.0:
+                score = min(score, self.visual_accuracy)
             if self.visual_accuracy < 80.0:
                 score = min(score, 50.0)
             elif self.visual_accuracy < 90.0:
                 score = min(score, 70.0)
-                
+
+        # Ensure we never return exactly 100% if any issues exist
+        if score >= 100.0 and (total_missing > 0 or self.has_rendering_errors or self.rendering_error_logs or (self.visual_accuracy is not None and self.visual_accuracy < 100.0)):
+            score = 99.0
+
         return max(0.0, round(score, 1))
 
     @property
@@ -161,9 +174,9 @@ class CloneValidator:
     def __init__(self, clone_dir: Path):
         self.clone_dir = clone_dir
 
-    async def validate(self, base_url: str) -> CloneReport:
+    async def validate(self, base_url: str, browser_manager: Any = None) -> CloneReport:
         report = self._run_static_checks()
-        report = await self._run_playwright_validation(report, base_url)
+        report = await self._run_playwright_validation(report, base_url, browser_manager)
 
         logger.info("Clone health: %.1f%%", report.overall_health)
         return report
@@ -171,15 +184,15 @@ class CloneValidator:
     def _run_static_checks(self, timeout: float = 0) -> CloneReport:
         import time
         start_time = time.time()
-        
+
         report = CloneReport()
 
         from jaguar.cloner.server import detect_entry_point
-        
+
         report.html.total = 1
         entry = detect_entry_point(str(self.clone_dir))
         entry_path = None
-        
+
         if entry:
             report.html.resolved = 1
             entry_path = self.clone_dir / entry
@@ -188,7 +201,7 @@ class CloneValidator:
 
         api_endpoints = ["/api/", "/graphql", "/auth/", "/login"]
         frontend_only_detected = False
-        
+
         # Scan both .html AND .php files (Moodle uses .php pages with HTML content)
         # Filter to actual files only — Moodle stores data in dirs named like 'styles.php/'
         html_files = set(p for p in self.clone_dir.rglob("*.html") if p.is_file())
@@ -267,7 +280,7 @@ class CloneValidator:
 
         return report
 
-    async def _run_playwright_validation(self, report: CloneReport, base_url: str) -> CloneReport:
+    async def _run_playwright_validation(self, report: CloneReport, base_url: str, browser_manager: Any = None) -> CloneReport:
         """Run a full local render via Playwright to ensure the clone visually functions."""
         try:
             from jaguar.browser.manager import BrowserManager
@@ -275,11 +288,14 @@ class CloneValidator:
         except ImportError:
             return report
 
-        browser = None
+        browser = browser_manager
+        should_close_browser = False
         server = None
         try:
-            browser = BrowserManager(headless=True)
-            await browser.start()
+            if not browser:
+                browser = BrowserManager(headless=True)
+                await browser.start()
+                should_close_browser = True
 
             import socket
             sock = socket.socket()
@@ -290,24 +306,26 @@ class CloneValidator:
             server = CloneServer(str(self.clone_dir), port=port)
             local_url = server.start()
 
+            logger.info("[DEBUG VALIDATOR] Calling new_page()")
             page = await browser.new_page()
+            logger.info("[DEBUG VALIDATOR] new_page() returned")
 
-            def handle_console(msg: "ConsoleMessage") -> None:
+            def handle_console(msg: ConsoleMessage) -> None:
                 if msg.type in ("error", "warning") and "Failed to load resource" in msg.text or msg.type == "error":
                     report.has_rendering_errors = True
                     report.rendering_error_logs.append(f"[Console] {msg.text}")
 
-            def handle_pageerror(err: "Error") -> None:
+            def handle_pageerror(err: Error) -> None:
                 report.has_rendering_errors = True
                 report.rendering_error_logs.append(f"[JS Exception] {err.message}")
 
-            def handle_requestfailed(req: "Request") -> None:
+            def handle_requestfailed(req: Request) -> None:
                 # 404s to local assets count as rendering errors
                 if req.failure:
                     report.has_rendering_errors = True
                     report.rendering_error_logs.append(f"[Network] Failed {req.url}: {req.failure}")
 
-            def handle_response(res: "Response") -> None:
+            def handle_response(res: Response) -> None:
                 if res.status >= 400:
                     report.has_rendering_errors = True
                     report.rendering_error_logs.append(f"[HTTP {res.status}] {res.url}")
@@ -317,24 +335,33 @@ class CloneValidator:
             page.on("requestfailed", handle_requestfailed)
             page.on("response", handle_response)
 
+            logger.info("[DEBUG VALIDATOR] Calling navigate_and_wait() to %s", local_url)
             await browser.navigate_and_wait(page, local_url)
-            await asyncio.sleep(2)  # Allow assets to load
+            logger.info("[DEBUG VALIDATOR] navigate_and_wait() returned")
 
+            logger.info("[DEBUG VALIDATOR] Sleeping 2s")
+            await asyncio.sleep(2)  # Allow assets to load
+            logger.info("[DEBUG VALIDATOR] Sleep returned")
+
+            logger.info("[DEBUG VALIDATOR] Calling page.close()")
             await page.close()
+            logger.info("[DEBUG VALIDATOR] page.close() returned")
 
         except Exception as e:
             logger.error("Playwright validation failed: %s", e)
         finally:
             if server:
                 server.stop()
-            if browser:
+            if browser and should_close_browser:
+                logger.info("[DEBUG VALIDATOR] Closing browser")
                 await browser.close()
-                
+                logger.info("[DEBUG VALIDATOR] Browser closed")
+
         # Run visual pixel diffing
         try:
             from jaguar.cloner.visual_compare import VisualCompare
             vc = VisualCompare(self.clone_dir)
-            vc_result = await vc.compare(original_url=base_url)
+            vc_result = await vc.compare(original_url=base_url, browser_manager=browser)
             report.visual_accuracy = vc_result.accuracy
             if vc_result.console_errors:
                 report.has_rendering_errors = True

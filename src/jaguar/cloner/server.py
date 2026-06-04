@@ -58,7 +58,7 @@ def _entry_score(path: Path, root: Path) -> tuple[int, int]:
 
 def detect_entry_point(directory: str) -> str | None:
     """Detect the main entry page of a cloned website.
-    
+
     Priority:
     1. Root index.html if it's a real page (not a JAGUAR redirect stub)
     2. Shallowest index.html / index.php / home.html that is a real page
@@ -99,21 +99,21 @@ def ensure_root_index(directory: str) -> str | None:
     root_index = root / "index.html"
 
     entry = detect_entry_point(directory)
-    
+
     if not entry and not root_index.exists():
         raise ValueError(f"No valid HTML entry point found in {directory}. The directory might be empty or not a cloned website.")
-    
+
     if not entry:
         return None
-        
+
     # If entry IS the root index.html, no redirect needed
     if entry == "index.html":
         return entry
-    
+
     # If root index.html is a real page (not a redirect), don't overwrite it
     if root_index.exists() and not _is_jaguar_redirect(root_index):
         return entry
-    
+
     # Create/update redirect stub at root index.html pointing to actual entry
     html = f"""<!DOCTYPE html>
 <html>
@@ -135,39 +135,64 @@ def ensure_root_index(directory: str) -> str | None:
 class SPARequestHandler(SimpleHTTPRequestHandler):
     """Custom handler for SPA routing and asset error logging."""
 
+    def send_head(self) -> Any:
+        """Override send_head to support suffix-based SPA asset resolution and fallback routing."""
+        path = self.translate_path(self.path)
+
+        # If it exists, let the superclass handle it
+        if os.path.exists(path):
+            if os.path.isdir(path):
+                # Check for index pages
+                for index in self.index_pages:
+                    index_file = os.path.join(path, index)
+                    if os.path.exists(index_file):
+                        return super().send_head()
+                # No index file, trigger list_directory which will return 403
+                return super().send_head()
+            return super().send_head()
+
+        # It does not exist. Check if it's an asset.
+        clean_path = self.path.split('?')[0].split('#')[0]
+        ext = Path(clean_path).suffix.lower()
+        asset_exts = {
+            '.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.woff2',
+            '.ttf', '.json', '.webmanifest', '.ico', '.map', '.mp4', '.mp3', '.ogg',
+            '.wav', '.webm', '.xml'
+        }
+
+        # Suffix-matching fallback asset resolver:
+        # If /nested/path/static/js/main.js doesn't exist, check if static/js/main.js or js/main.js or main.js exists.
+        parts = [p for p in clean_path.split("/") if p]
+        for i in range(1, len(parts)):
+            suffix_path = "/".join(parts[i:])
+            resolved_local = Path(self.directory) / suffix_path
+            if resolved_local.exists() and resolved_local.is_file():
+                # Serve the resolved suffix file
+                self.path = "/" + suffix_path
+                return super().send_head()
+
+        # If it is an asset but not found anywhere, trigger 404
+        if ext in asset_exts:
+            print(f"\033[91m[404] Broken Asset:\033[0m {self.path}")
+            self.send_error(404, f"Asset not found: {self.path}")
+            return None
+
+        # Otherwise, assume it's a client-side SPA route and return index.html
+        index_path = Path(self.directory) / "index.html"
+        if index_path.exists():
+            try:
+                self.path = "/index.html"
+                return super().send_head()
+            except Exception:
+                pass
+
+        # Serve offline placeholder
+        print(f"\033[91m[404] Route Not Found (Offline Placeholder served):\033[0m {self.path}")
+        self.send_error(404)
+        return None
+
     def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
         if code == 404:
-            # Check if this looks like an asset vs a route
-            path = self.path.split('?')[0].split('#')[0]
-            ext = Path(path).suffix.lower()
-
-            # Known asset extensions that should naturally 404 instead of serving index.html
-            asset_exts = {'.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.woff2', '.ttf', '.json', '.webmanifest'}
-
-            if ext in asset_exts:
-                # Log actual broken asset!
-                # We use print here with ANSI colors because the standard logger might not hit the console nicely if rich isn't wrapping it.
-                print(f"\033[91m[404] Broken Asset:\033[0m {self.path}")
-                super().send_error(code, message, explain)
-                return
-
-            # Otherwise, assume it's a client-side SPA route and return index.html
-            index_path = Path(self.directory) / "index.html"
-            if index_path.exists():
-                try:
-                    with open(index_path, 'rb') as f:
-                        content = f.read()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/html")
-                    self.send_header("Content-Length", str(len(content)))
-                    self.end_headers()
-                    self.wfile.write(content)
-                    return
-                except Exception:
-                    pass
-
-            print(f"\033[91m[404] Route Not Found (Offline Placeholder served):\033[0m {self.path}")
-            
             # Serve Generated Offline Placeholder
             offline_html = f"""<!DOCTYPE html>
 <html>
@@ -200,7 +225,7 @@ class SPARequestHandler(SimpleHTTPRequestHandler):
 
         super().send_error(code, message, explain)
 
-    def list_directory(self, path: str) -> None:
+    def list_directory(self, path: str | os.PathLike[str]) -> Any:
         """Override directory listing to prevent leaking user files. Return offline placeholder instead."""
         print(f"\033[93m[403] Directory Listing Blocked:\033[0m {self.path}")
         offline_html = f"""<!DOCTYPE html>
@@ -235,19 +260,20 @@ class SPARequestHandler(SimpleHTTPRequestHandler):
         # Suppress standard HTTP logs unless it's an error to keep console clean during SPA testing
         pass
 
-    def guess_type(self, path: str) -> str:
+    def guess_type(self, path: str | os.PathLike[str]) -> str:
         """Override MIME type guessing using .meta.json and Sec-Fetch-Dest."""
+        path_str = os.fspath(path)
         try:
-            import os, json
-            meta_path = path + ".meta.json"
+            import json
+            meta_path = path_str + ".meta.json"
             if os.path.exists(meta_path):
-                with open(meta_path, "r") as f:
+                with open(meta_path) as f:
                     meta = json.load(f)
                 if meta.get("Content-Type"):
-                    return meta["Content-Type"].split(";")[0]
+                    return str(meta["Content-Type"].split(";")[0])
         except Exception:
             pass
-            
+
         dest = self.headers.get("Sec-Fetch-Dest")
         if dest == "style":
             return "text/css"
@@ -255,16 +281,17 @@ class SPARequestHandler(SimpleHTTPRequestHandler):
             return "application/javascript"
         if dest == "font":
             return "font/woff2"
-            
-        return super().guess_type(path)
+
+        return str(super().guess_type(path))
 
     def end_headers(self) -> None:
         try:
-            import os, json
+            import json
+            import os
             path = self.translate_path(self.path)
             meta_path = path + ".meta.json"
             if os.path.exists(meta_path):
-                with open(meta_path, "r") as f:
+                with open(meta_path) as f:
                     meta = json.load(f)
                 if meta.get("Content-Encoding"):
                     self.send_header("Content-Encoding", meta["Content-Encoding"])
@@ -296,8 +323,19 @@ class CloneServer:
 
         # Ensure entry point exists
         entry = ensure_root_index(self.directory)
-        if entry:
-            logger.info("Auto-detected entry point: %s", entry)
+        if not entry:
+            raise ValueError(f"Refusing to serve {self.directory}: Entry point could not be detected.")
+
+        entry_path = os.path.abspath(os.path.join(self.directory, entry))
+        if not os.path.exists(entry_path):
+            raise FileNotFoundError(f"Refusing to serve {self.directory}: Detected entry point '{entry}' does not exist.")
+
+        # Ensure it is inside the clone root directory (prevent path traversal / exposing parent directories)
+        common_path = os.path.commonpath([self.directory, entry_path])
+        if common_path != self.directory:
+            raise PermissionError(f"Refusing to serve {self.directory}: Entry point '{entry}' is outside the clone directory.")
+
+        logger.info("Auto-detected entry point: %s", entry)
 
         import functools
         # Bind the directory to the handler class so SimpleHTTPRequestHandler
@@ -335,10 +373,10 @@ class CloneServer:
     def stop(self) -> None:
         """Stop the background server."""
         if self.server:
-            self.server.shutdown()
-            self.server.server_close()
+            try:
+                self.server.server_close()
+            except Exception:
+                pass
             self.server = None
-        if self.thread:
-            self.thread.join(timeout=1.0)
-            self.thread = None
+        self.thread = None
         logger.info("Clone server stopped.")

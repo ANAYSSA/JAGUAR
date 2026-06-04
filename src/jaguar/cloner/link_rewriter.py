@@ -124,8 +124,17 @@ class LinkRewriter:
         if url.startswith(("javascript:", "mailto:", "tel:", "data:", "#")):
             return url
 
+        # Recursively decode encoded / double-encoded URLs
+        from urllib.parse import unquote
+        url_decoded = url
+        for _ in range(3):
+            decoded = unquote(url_decoded)
+            if decoded == url_decoded:
+                break
+            url_decoded = decoded
+
         # Resolve relative URLs
-        absolute = urljoin(current_url, url)
+        absolute = urljoin(current_url, url_decoded)
         parsed = urlparse(absolute)
 
         # External links

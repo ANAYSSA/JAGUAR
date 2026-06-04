@@ -57,6 +57,8 @@ class ClonerEngine:
         self._queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
         self._assets_queue: asyncio.Queue[str] = asyncio.Queue()
         self._assets_visited: set[str] = set()
+        self._worker_states: dict[str, str] = {}
+        self._active_fetches: set[str] = set()
 
         self.http: HttpClient | None = None
         self.rewriter: LinkRewriter | None = None
@@ -99,12 +101,30 @@ class ClonerEngine:
     def _get_windows_locale(self) -> str:
         try:
             import ctypes
+            buf = ctypes.create_unicode_buffer(85)
+            if ctypes.windll.kernel32.GetUserDefaultLocaleName(buf, 85):
+                return buf.value.replace("_", "-")
+        except Exception:
+            pass
+
+        try:
+            import ctypes
             import locale
             lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
             win_lang = locale.windows_locale.get(lang_id, "en_US")
             return win_lang.replace("_", "-")
         except Exception:
-            return "en-US"
+            pass
+
+        try:
+            import locale
+            loc = locale.getdefaultlocale()[0]
+            if loc:
+                return loc.replace("_", "-")
+        except Exception:
+            pass
+
+        return "en-US"
 
     def _get_accept_language_header(self) -> str:
         loc = self.site_language
@@ -191,8 +211,10 @@ class ClonerEngine:
 
                 # Wait for queues to empty
                 try:
-                    await self._queue.join()
-                    await self._assets_queue.join()
+                    await asyncio.wait_for(self._queue.join(), timeout=300)
+                    await asyncio.wait_for(self._assets_queue.join(), timeout=300)
+                except TimeoutError:
+                    logger.error("Queue join timed out! Possible deadlock or extremely slow downloads.")
                 finally:
                     monitor_task.cancel()
 
@@ -203,18 +225,18 @@ class ClonerEngine:
                 # Await cancellation
                 await asyncio.gather(*(page_workers + asset_workers), return_exceptions=True)
 
+            logger.info(
+                "Cloning complete. Downloaded %d pages and %d assets.",
+                len(self._visited),
+                len(self._assets_visited),
+            )
+
+            # Post-clone phases while browser is still active
+            await self._post_clone(target_dir)
+
         finally:
             if self.browser_manager:
                 await self.browser_manager.close()
-
-        logger.info(
-            "Cloning complete. Downloaded %d pages and %d assets.",
-            len(self._visited),
-            len(self._assets_visited),
-        )
-
-        # Post-clone phases
-        await self._post_clone(target_dir)
 
         return str(target_dir.absolute())
 
@@ -257,7 +279,7 @@ class ClonerEngine:
         try:
             validator = CloneValidator(target_dir)
             # Await Playwright rendering validation
-            self.clone_report = await validator.validate(self.base_url)
+            self.clone_report = await validator.validate(self.base_url, self.browser_manager)
             self.clone_report.system_language = self.system_language
             self.clone_report.selected_language = self.selected_language
             self.clone_report.final_site_language = self.final_site_language
@@ -278,42 +300,90 @@ class ClonerEngine:
         last_visited = 0
         last_assets = 0
         stalls = 0
-        
+
         while True:
             await asyncio.sleep(1)
             current_visited = len(self._visited)
             current_assets = len(self._assets_visited)
-            
-            if current_visited == last_visited and current_assets == last_assets and self._queue.empty() and self._assets_queue.empty():
+
+            if current_visited == last_visited and current_assets == last_assets:
                 stalls += 1
             else:
                 stalls = 0
-                
+
             if stalls >= 15:
                 logger.error("\n\033[91m[DEADLOCK DETECTED] Clone stalled for 15s!\033[0m")
-                logger.error("Active tasks: %d", len(asyncio.all_tasks()))
-                logger.error("Current URL: %s", getattr(self, 'current_url', 'Unknown'))
+                logger.error(f"Reason: Progress did not change for 15 consecutive seconds. Visited: {current_visited}, Assets: {current_assets}")
+                logger.error(f"Current URL: {getattr(self, 'current_url', 'Unknown')}")
+                logger.error(f"Visited count: {len(self._visited)}")
+                logger.error(f"Assets count: {len(self._assets_visited)}")
+
+                logger.error("\n--- Active Asyncio Tasks ---")
+                try:
+                    for t in asyncio.all_tasks():
+                        logger.error(f"  Task {t.get_name()}: coro={t.get_coro()}")
+                except Exception as e:
+                    logger.error(f"  Failed to dump tasks: {e}")
+
+                logger.error("\n--- Worker States ---")
+                for k, v in self._worker_states.items():
+                    logger.error(f"  {k}: {v}")
+
+                logger.error("\n--- Queue Contents ---")
+                logger.error(f"  Page Queue Size: {self._queue.qsize()}")
+                try:
+                    page_items = list(getattr(self._queue, "_queue", []))
+                    for item in page_items[:10]:
+                        logger.error(f"    - {item}")
+                    if len(page_items) > 10:
+                        logger.error(f"    ... and {len(page_items)-10} more")
+                except Exception:
+                    pass
+
+                logger.error(f"  Asset Queue Size: {self._assets_queue.qsize()}")
+                try:
+                    asset_items = list(getattr(self._assets_queue, "_queue", []))
+                    for item in asset_items[:10]:
+                        logger.error(f"    - {item}")
+                    if len(asset_items) > 10:
+                        logger.error(f"    ... and {len(asset_items)-10} more")
+                except Exception:
+                    pass
+
+                logger.error("\n--- Pending Requests ---")
+                for req_url in self._active_fetches:
+                    logger.error(f"  Fetching: {req_url}")
                 logger.error("Dumping pending futures and forcing exit...")
+
                 for w in workers:
                     w.cancel()
                 # Unblock the join
                 while not self._queue.empty():
-                    self._queue.get_nowait()
-                    self._queue.task_done()
+                    try:
+                        self._queue.get_nowait()
+                        self._queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
                 while not self._assets_queue.empty():
-                    self._assets_queue.get_nowait()
-                    self._assets_queue.task_done()
+                    try:
+                        self._assets_queue.get_nowait()
+                        self._assets_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
                 break
-                
+
             last_visited = current_visited
             last_assets = current_assets
 
     async def _page_worker(self, base_dir: Path) -> None:
         """Worker that processes HTML pages."""
+        task_id = f"page_worker_{id(asyncio.current_task())}"
         while True:
             try:
+                self._worker_states[task_id] = "waiting for task"
                 url, depth = await self._queue.get()
                 self.current_url = url
+                self._worker_states[task_id] = f"processing {url}"
 
                 if len(self._visited) >= self.max_pages:
                     # Drain remaining queue instantly
@@ -328,6 +398,7 @@ class ClonerEngine:
                 await self._process_page(url, depth, base_dir)
 
             except asyncio.CancelledError:
+                self._worker_states[task_id] = "cancelled"
                 break
             except Exception as e:
                 logger.error("Error processing page %s: %s", url, e)
@@ -336,12 +407,16 @@ class ClonerEngine:
 
     async def _asset_worker(self, base_dir: Path) -> None:
         """Worker that downloads static assets."""
+        task_id = f"asset_worker_{id(asyncio.current_task())}"
         while True:
             try:
+                self._worker_states[task_id] = "waiting for task"
                 url = await self._assets_queue.get()
                 self.current_url = url
+                self._worker_states[task_id] = f"downloading {url}"
                 await self._download_asset(url, base_dir)
             except asyncio.CancelledError:
+                self._worker_states[task_id] = "cancelled"
                 break
             except Exception as e:
                 logger.error("Error downloading asset %s: %s", url, e)
@@ -358,26 +433,36 @@ class ClonerEngine:
         assert self.rewriter is not None
 
         html_content = ""
+        response_obj = None
 
         if self.render_spa and self.spa_renderer:
             # Render JS-heavy page
             try:
-                html_content = await self.spa_renderer.render_to_static_html(url, locale=self.site_language)
+                self._active_fetches.add(url)
+                html_content = await asyncio.wait_for(
+                    self.spa_renderer.render_to_static_html(url, locale=self.site_language),
+                    timeout=20.0
+                )
             except Exception as e:
                 logger.warning("SPA render failed for %s, falling back to basic HTTP: %s", url, e)
+            finally:
+                self._active_fetches.discard(url)
 
         if not html_content:
             # Basic HTTP fetch
             try:
-                response = await self.http.get(url, use_cache=False)
-                if not response.content_type.startswith("text/html"):
+                self._active_fetches.add(url)
+                response_obj = await self.http.get(url, use_cache=False)
+                if not response_obj.content_type.startswith("text/html"):
                     # Might be an asset wrongly queued as page
                     self._enqueue_asset(url)
                     return
-                html_content = response.body
+                html_content = response_obj.body
             except Exception as e:
                 logger.error("Failed to fetch %s: %s", url, e)
                 return
+            finally:
+                self._active_fetches.discard(url)
 
         # Parse HTML to find links and assets
         soup = BeautifulSoup(html_content, "lxml")
@@ -395,6 +480,26 @@ class ClonerEngine:
         # Save to disk
         local_path = self._url_to_local_path(url, base_dir, is_html=True)
         await self._save_file(local_path, rewritten_html.encode("utf-8"))
+
+        # Save metadata for the page
+        content_type = "text/html"
+        content_encoding = ""
+        cache_control = ""
+        if response_obj:
+            content_type = response_obj.headers.get("Content-Type", "text/html")
+            content_encoding = response_obj.headers.get("Content-Encoding", "")
+            if content_encoding.lower() in ("gzip", "deflate", "br", "zstd"):
+                content_encoding = ""
+            cache_control = response_obj.headers.get("Cache-Control", "")
+
+        meta = {
+            "Content-Type": content_type,
+            "Content-Encoding": content_encoding,
+            "Cache-Control": cache_control
+        }
+        import json
+        meta_path = local_path.with_name(local_path.name + ".meta.json")
+        await self._save_file(meta_path, json.dumps(meta).encode("utf-8"))
 
     def _extract_and_queue_assets(self, soup: BeautifulSoup, current_url: str) -> None:
         """Find assets in HTML and add to download queue."""
@@ -451,7 +556,7 @@ class ClonerEngine:
         assert self.rewriter is not None
 
         try:
-            # We use underlying aiohttp session for binary download
+            self._active_fetches.add(url)
             async with self.http._session.get(url) as response:  # type: ignore
                 if response.status != 200:
                     return
@@ -470,11 +575,15 @@ class ClonerEngine:
 
                 local_path = self._url_to_local_path(url, base_dir, is_html=False)
                 await self._save_file(local_path, content)
-                
+
                 # Save metadata for LMS / Server
+                content_encoding = response.headers.get("Content-Encoding", "")
+                if content_encoding.lower() in ("gzip", "deflate", "br", "zstd"):
+                    content_encoding = ""
+
                 meta = {
                     "Content-Type": content_type,
-                    "Content-Encoding": response.headers.get("Content-Encoding", ""),
+                    "Content-Encoding": content_encoding,
                     "Cache-Control": response.headers.get("Cache-Control", "")
                 }
                 import json
@@ -483,6 +592,8 @@ class ClonerEngine:
 
         except Exception as e:
             logger.debug("Failed to download asset %s: %s", url, e)
+        finally:
+            self._active_fetches.discard(url)
 
     def _url_to_local_path(self, url: str, base_dir: Path, is_html: bool) -> Path:
         """Convert a URL to an absolute filesystem path within base_dir."""

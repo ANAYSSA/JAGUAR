@@ -105,6 +105,12 @@ class BrowserManager:
             context_options["user_agent"] = user_agent
         if locale:
             context_options["locale"] = locale
+            lang_code = locale.split("-")[0]
+            if lang_code != locale:
+                accept_lang = f"{locale},{lang_code};q=0.9,en;q=0.8"
+            else:
+                accept_lang = f"{locale},en;q=0.9"
+            context_options["extra_http_headers"] = {"Accept-Language": accept_lang}
 
         context = await self._browser.new_context(**context_options)
         page = await context.new_page()
