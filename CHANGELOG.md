@@ -1,3 +1,12 @@
+## [1.0.4] - Visual Clone Accuracy & Website Rebuilder
+- Added CSS dependency resolver with recursive @import and @font-face support.
+- Added post-clone rebuilder with entry-point detection and path rewriting.
+- Added clone validation engine with per-category health scoring.
+- Added visual comparison engine via Playwright screenshot diff.
+- Added --verify flag to clone command.
+- Improved link rewriter with source/video/audio/srcset/inline-style support.
+- Smart serve with auto entry-point redirect and proper MIME types.
+
 ## [1.0.3] - Enterprise Calibration & Clone UX
 - Added jaguar serve command for local cloning.
 - Added --serve flag to clone command.

@@ -37,6 +37,9 @@ jaguar compare https://example.com https://competitor.com
 # Clone a Next.js / React application offline and serve it
 jaguar clone https://nextjs.org --spa --serve
 
+# Clone with visual accuracy verification
+jaguar clone https://example.com --verify
+
 # Serve a previously cloned application locally
 jaguar serve ./jaguar-clones/nextjs.org
 ```
