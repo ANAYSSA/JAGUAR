@@ -42,11 +42,64 @@ class LinkRewriter:
             for img in soup.find_all("img", src=True):
                 img["src"] = self._rewrite_url(img["src"], current_url, is_asset=True)
 
+            # Rewrite <source>, <video>, <audio> tags
+            for tag_name in ["source", "video", "audio"]:
+                for el in soup.find_all(tag_name, src=True):
+                    el["src"] = self._rewrite_url(el["src"], current_url, is_asset=True)
+
+            # Rewrite srcset attributes (img, source)
+            for el in soup.find_all(["img", "source"], srcset=True):
+                srcset = el["srcset"]
+                parts = []
+                for entry in srcset.split(","):
+                    entry = entry.strip()
+                    if not entry:
+                        continue
+                    tokens = entry.split()
+                    if tokens:
+                        tokens[0] = self._rewrite_url(tokens[0], current_url, is_asset=True)
+                    parts.append(" ".join(tokens))
+                el["srcset"] = ", ".join(parts)
+
+            # Rewrite <meta content> with image URLs (og:image etc.)
+            for meta in soup.find_all("meta", content=True):
+                prop = meta.get("property", "") or meta.get("name", "")
+                if "image" in prop.lower() or "url" in prop.lower():
+                    val = meta["content"]
+                    if val.startswith(("http://", "https://", "/")):
+                        meta["content"] = self._rewrite_url(val, current_url, is_asset=True)
+
+            # Rewrite inline style attributes containing url()
+            for el in soup.find_all(style=True):
+                style = el["style"]
+                if "url(" in style:
+                    el["style"] = self._rewrite_inline_style(style, current_url)
+
+            # Rewrite <object> and <embed>
+            for el in soup.find_all(["object", "embed"], data=True):
+                el["data"] = self._rewrite_url(el["data"], current_url, is_asset=True)
+
+            # Rewrite poster attribute on <video>
+            for el in soup.find_all("video", poster=True):
+                el["poster"] = self._rewrite_url(el["poster"], current_url, is_asset=True)
+
             return str(soup)
 
         except Exception as e:
             logger.error("Failed to rewrite HTML for %s: %s", current_url, e)
             return html
+
+    def _rewrite_inline_style(self, style: str, current_url: str) -> str:
+        """Rewrite url() references in an inline style attribute."""
+        def replace_url(match: re.Match) -> str:  # type: ignore
+            original = match.group(1)
+            cleaned = original.strip("'\"")
+            if cleaned.startswith("data:"):
+                return match.group(0)  # type: ignore
+            rewritten = self._rewrite_url(cleaned, current_url, is_asset=True)
+            return f"url('{rewritten}')"
+
+        return re.sub(r"url\(([^)]+)\)", replace_url, style)
 
     def rewrite_css(self, css: str, current_url: str) -> str:
         """Rewrite url() references in CSS files."""
