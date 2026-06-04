@@ -1,6 +1,6 @@
 # JAGUAR Installation Guide
 
-JAGUAR (v1.0.8) supports local installation via pip.
+JAGUAR (v1.0.9) supports local installation via pip.
 
 ## Prerequisites
 - Python 3.12+

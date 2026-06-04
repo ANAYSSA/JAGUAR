@@ -45,8 +45,9 @@ class CloneReport:
     entry_point: str | None = None
     is_spa: bool = False
 
-    site_language: str = "Unknown"
-    language_source: str = "Unknown"
+    system_language: str = "Unknown"
+    selected_language: str = "Unknown"
+    final_site_language: str = "Unknown"
     visual_accuracy: float | None = None
 
     @property
@@ -72,8 +73,9 @@ class CloneReport:
             "# Clone Report",
             "",
             f"**Overall Health:** {self.overall_health}%",
-            f"**Site Language:** {self.site_language}",
-            f"**Language Source:** {self.language_source}",
+            f"**Detected System Language:** {self.system_language}",
+            f"**Selected Clone Language:** {self.selected_language}",
+            f"**Final Site Language:** {self.final_site_language}",
             f"**Visual Accuracy:** {f'{self.visual_accuracy}%' if self.visual_accuracy else 'N/A'}",
             "",
         ]

@@ -40,6 +40,7 @@ class ClonerEngine:
         verify: bool = False,
         output_dir: str = "./jaguar-clones",
         config: dict[str, Any] | None = None,
+        locale_override: str | None = None,
     ):
         self.max_depth = max_depth
         self.max_pages = max_pages
@@ -66,43 +67,52 @@ class ClonerEngine:
         self.language_source = ""
         self.failed_assets_count = 0
         self.current_url = ""
+        self.locale_override = locale_override
+        self.system_language = "Unknown"
+        self.final_site_language = "Unknown"
 
-    async def _detect_language(self, url: str) -> None:
+    def _determine_locale(self) -> None:
+        """Determine the final locale to use based on strict priority."""
+        # 1. Override via CLI
+        if self.locale_override:
+            self.site_language = self.locale_override
+            self.selected_language = self.locale_override
+            self.language_source = "CLI Override"
+            self.system_language = self._get_windows_locale()
+            return
+
+        # 2. Configured User Language
         user_lang = self.config.get("cloner", {}).get("language")
-        
-        self.language_source = "OS Locale"
-        import locale
-        loc, _ = locale.getdefaultlocale()
-        self.site_language = loc or "en-US"
-
-        try:
-            assert self.http is not None
-            response = await self.http.get(url, use_cache=False)
-
-            lang = response.headers.get("Content-Language")
-            if lang:
-                self.site_language = lang.split(",")[0].strip()
-                self.language_source = "Header"
-                return
-
-            if response.content_type.startswith("text/html"):
-                from bs4 import BeautifulSoup, Tag
-                soup = BeautifulSoup(response.body, "lxml")
-                html_tag = soup.find("html")
-                if isinstance(html_tag, Tag):
-                    lang_attr = html_tag.get("lang")
-                    if lang_attr:
-                        self.site_language = str(lang_attr)
-                        self.language_source = "HTML"
-                        return
-        except Exception as e:
-            logger.debug("Failed to detect language: %s", e)
-            # If the root URL fails completely here, we must raise so the cloner stops!
-            raise RuntimeError(f"Failed to fetch initial URL: {url}. Server may be down or nonexistent.") from e
-            
         if user_lang:
             self.site_language = user_lang
+            self.selected_language = user_lang
             self.language_source = "User Configured"
+            self.system_language = self._get_windows_locale()
+            return
+
+        # 3. Windows OS Locale
+        win_lang = self._get_windows_locale()
+        self.site_language = win_lang
+        self.selected_language = win_lang
+        self.language_source = "OS Locale"
+        self.system_language = win_lang
+
+    def _get_windows_locale(self) -> str:
+        try:
+            import ctypes
+            import locale
+            lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+            win_lang = locale.windows_locale.get(lang_id, "en_US")
+            return win_lang.replace("_", "-")
+        except Exception:
+            return "en-US"
+
+    def _get_accept_language_header(self) -> str:
+        loc = self.site_language
+        lang_code = loc.split("-")[0]
+        if lang_code != loc:
+            return f"{loc},{lang_code};q=0.9,en;q=0.8"
+        return f"{loc},en;q=0.9"
 
     async def clone(self, url: str) -> str:
         """
@@ -141,9 +151,13 @@ class ClonerEngine:
                 logger.warning("Playwright not installed. SPA rendering disabled.")
                 self.render_spa = False
 
+        self._determine_locale()
+        accept_lang = self._get_accept_language_header()
+
         http_config = HttpClientConfig(
             max_retries=2,
             timeout=aiohttp.ClientTimeout(total=30),
+            headers={"Accept-Language": accept_lang},
         )
 
         # Enqueue start URL
@@ -153,7 +167,13 @@ class ClonerEngine:
         try:
             async with HttpClient(http_config) as http:
                 self.http = http
-                await self._detect_language(self.base_url)
+                
+                # Check root URL health and capture final site language
+                try:
+                    response = await self.http.get(self.base_url, use_cache=False)
+                    self.final_site_language = response.headers.get("Content-Language", self.site_language).split(",")[0].strip()
+                except Exception as e:
+                    raise RuntimeError(f"Failed to fetch initial URL: {self.base_url}. Server may be down or nonexistent.") from e
 
                 # Create workers for HTML pages
                 page_workers = [
@@ -235,6 +255,9 @@ class ClonerEngine:
         try:
             validator = CloneValidator(target_dir)
             self.clone_report = validator.validate()
+            self.clone_report.system_language = self.system_language
+            self.clone_report.selected_language = self.selected_language
+            self.clone_report.final_site_language = self.final_site_language
 
             # Write CLONE_REPORT.md
             report_path = target_dir / "CLONE_REPORT.md"

@@ -1,3 +1,14 @@
+## [1.0.9] - 2026-06-04
+### Added
+- Native OS UI Language Detection mapping Windows kernel display settings directly to JAGUAR.
+- `Accept-Language` headers are now automatically injected into all `aiohttp` requests to enforce regional assets/responses.
+- Added `--lang` override parameter to `jaguar clone` CLI, allowing manual forcing of any locale.
+- Redesigned the CLONE_REPORT.md structure to expose `Detected System Language`, `Selected Clone Language`, and `Final Site Language`.
+
+### Fixed
+- Fixed an issue where Github and other modern sites would default to unexpected regional languages (e.g. German instead of English/Russian).
+- Playwright SPA contexts now reliably receive the enforced locale, driving internal navigator languages and dates matching the selected translation.
+
 ## [1.0.8] - 2026-06-04
 ### Added
 - Packaging Sync: Fully synchronized pyproject.toml hatchling versioning with pip dist-info metadata.

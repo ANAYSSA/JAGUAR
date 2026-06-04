@@ -210,10 +210,11 @@ def scan(url: str, format: str, output: str | None, no_browser: bool, no_store: 
 @click.argument("url")
 @click.option("--depth", "-d", default=1, help="Crawl depth.")
 @click.option("--pages", "-p", default=50, help="Maximum number of pages to clone.")
+@click.option("--lang", help="Override the clone language (e.g. en-US, ru-RU).")
 @click.option("--spa", is_flag=True, help="Use browser to pre-render single page applications.")
 @click.option("--serve", is_flag=True, help="Start a local server to view the clone immediately.")
 @click.option("--verify", is_flag=True, help="Capture screenshots and compare visual accuracy.")
-def clone(url: str, depth: int, pages: int, spa: bool, serve: bool, verify: bool) -> None:
+def clone(url: str, depth: int, pages: int, lang: str | None, spa: bool, serve: bool, verify: bool) -> None:
     """Clone a website for offline viewing."""
 
     async def _clone() -> None:
@@ -222,7 +223,7 @@ def clone(url: str, depth: int, pages: int, spa: bool, serve: bool, verify: bool
         cfg = load_config()
         clone_dir = cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones")
 
-        engine = ClonerEngine(max_depth=depth, max_pages=pages, render_spa=spa, verify=verify, output_dir=clone_dir, config=cfg)
+        engine = ClonerEngine(max_depth=depth, max_pages=pages, render_spa=spa, verify=verify, output_dir=clone_dir, config=cfg, locale_override=lang)
 
         import time
         start_time = time.time()
