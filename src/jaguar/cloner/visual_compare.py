@@ -97,9 +97,9 @@ class VisualCompare:
                 def log_message(self, format: str, *args: object) -> None:
                     pass  # Suppress logs
 
-            socketserver.TCPServer.allow_reuse_address = True
+            socketserver.ThreadingTCPServer.allow_reuse_address = True
 
-            server = socketserver.TCPServer(("127.0.0.1", local_port), Handler)
+            server = socketserver.ThreadingTCPServer(("127.0.0.1", local_port), Handler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
 
