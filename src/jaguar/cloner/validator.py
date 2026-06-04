@@ -61,11 +61,28 @@ class CloneReport:
         cats = [self.html, self.css, self.js, self.images, self.fonts, self.svg, self.manifest, self.media, self.links]
         non_empty = [c for c in cats if c.total > 0]
         if not non_empty:
-            return 100.0
-        # If HTML has 0 resolved but some total, it means index.html or main pages failed!
-        if self.html.total > 0 and self.html.resolved == 0:
-            return 0.0
-        return round(sum((c.resolved / c.total) * 100 for c in non_empty) / len(non_empty), 1)
+            score = 100.0
+        else:
+            # If HTML has 0 resolved but some total, it means index.html or main pages failed!
+            if self.html.total > 0 and self.html.resolved == 0:
+                score = 0.0
+            else:
+                score = sum((c.resolved / c.total) * 100 for c in non_empty) / len(non_empty)
+                
+        # Critical penalties
+        if self.has_rendering_errors:
+            score -= 20.0  # Massive penalty for rendering 404s/console errors
+            
+        if self.visual_accuracy is not None and self.visual_accuracy < 90.0:
+            score -= (90.0 - self.visual_accuracy) * 0.5
+            
+        # Hard limits based on categories
+        if self.css.total > 0 and self.css.missing:
+            score = min(score, 75.0)
+        if self.js.total > 0 and self.js.missing:
+            score = min(score, 85.0)
+            
+        return max(0.0, round(score, 1))
 
     @property
     def total_missing(self) -> int:
@@ -274,6 +291,17 @@ class CloneValidator:
                 server.stop()
             if browser:
                 await browser.close()
+                
+        # Run visual pixel diffing
+        try:
+            from jaguar.cloner.visual_compare import VisualCompare
+            vc = VisualCompare(self.clone_dir)
+            vc_result = await vc.compare(original_url=base_url)
+            report.visual_accuracy = vc_result.accuracy
+            if vc_result.console_errors:
+                report.has_rendering_errors = True
+        except Exception as e:
+            logger.error("Visual compare failed: %s", e)
 
         return report
 

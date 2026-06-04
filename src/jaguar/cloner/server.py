@@ -143,6 +143,11 @@ class CloneServer:
         if not os.path.exists(self.directory):
             raise FileNotFoundError(f"Directory {self.directory} does not exist.")
 
+        # Ensure directory is actually a valid clone (must contain some HTML)
+        root = Path(self.directory)
+        if not (root / "index.html").exists() and not list(root.rglob("*.html")):
+            raise ValueError(f"Refusing to serve {self.directory}: Not a valid JAGUAR clone (no HTML files found). This prevents accidental exposure of user directories.")
+
         # Ensure entry point exists
         entry = ensure_root_index(self.directory)
         if entry:

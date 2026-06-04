@@ -307,18 +307,18 @@ def clone(url: str, depth: int, pages: int, lang: str, spa: bool, serve: bool, v
             click.echo("\nOr:\npython -m http.server 8080\n")
 
         if serve:
-            import http.server
-            import socketserver
-            class Handler(http.server.SimpleHTTPRequestHandler):
-                def __init__(self, *args: object, **kwargs: object) -> None:
-                    super().__init__(*args, directory=output_dir, **kwargs)  # type: ignore[arg-type]
-            port = 8080
-            click.echo(f"Serving:\n{os.path.abspath(output_dir)}\n\nOpen:\nhttp://localhost:{port}")
+            from jaguar.cloner.server import CloneServer
+            server = CloneServer(str(output_dir), port=8080)
+            serve_url = server.start()
+            click.echo(f"Serving at {serve_url}")
             try:
-                with socketserver.TCPServer(("127.0.0.1", port), Handler) as httpd:
-                    httpd.serve_forever()
+                import time
+                while True:
+                    time.sleep(1)
             except KeyboardInterrupt:
-                click.echo("\nServer stopped.")
+                server.stop()
+            except Exception as e:
+                click.echo(f"Error: {e}", err=True)
 
     _run_async(_clone())
 
@@ -329,15 +329,28 @@ def clone_doctor(path: str) -> None:
     """Diagnose broken assets in a cloned website."""
     from pathlib import Path
     click.echo(f"Running clone doctor on: {path}\n")
+    
+    from jaguar.config import load_config
+    cfg = load_config()
+    clone_dir_base = Path(cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones"))
+    
     clone_dir = Path(path)
-    if not clone_dir.exists():
-        click.echo("Error: Directory does not exist.", err=True)
-        return
+    if not clone_dir.exists() and (clone_dir_base / path).exists():
+        clone_dir = clone_dir_base / path
 
+    if not clone_dir.exists():
+        click.echo("\033[91mError: Directory does not exist.\033[0m", err=True)
+        return
+        
+    if not (clone_dir / "index.html").exists() and not list(clone_dir.rglob("*.html")):
+        click.echo(f"\033[91mCritical Error: Directory '{clone_dir}' does not appear to be a JAGUAR clone (no entry point found).\033[0m")
+        click.echo("Check your serve root configuration.")
+        return
+        
     from jaguar.cloner.validator import CloneValidator
     validator = CloneValidator(clone_dir)
     report = validator._run_static_checks()
-
+    
     broken = False
     for name, cat in [
         ("Broken HTML", report.html),
@@ -355,7 +368,7 @@ def clone_doctor(path: str) -> None:
             if len(cat.missing) > 10:
                 click.echo(f"  ... and {len(cat.missing)-10} more.")
             click.echo()
-
+            
     if not broken:
         click.echo("\033[92mAll static assets are perfectly intact!\033[0m")
     else:
@@ -366,16 +379,57 @@ def clone_doctor(path: str) -> None:
 
 
 @cli.command()
-@click.argument("path")
+@click.argument("path", default="latest")
 @click.option("--port", default=8080, help="Port to serve on.")
 def serve(path: str, port: int) -> None:
     """Serve a cloned website locally with SPA routing support."""
+    import os
+    from pathlib import Path
+    from jaguar.config import load_config
     from jaguar.cloner.server import CloneServer
 
     try:
-        server = CloneServer(path, port=port)
+        cfg = load_config()
+        clone_dir = Path(cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones"))
+
+        target_path = Path(path)
+        if path.lower() == "latest":
+            dirs = [d for d in clone_dir.iterdir() if d.is_dir()]
+            if not dirs:
+                click.echo("Error: No clones found in clone directory.")
+                return
+            target_path = max(dirs, key=lambda p: p.stat().st_mtime)
+            click.echo(f"Resolved 'latest' to: {target_path.name}")
+        elif not target_path.exists() and (clone_dir / path).exists():
+            target_path = clone_dir / path
+        elif not target_path.exists():
+            click.echo(f"Error: Path {path} does not exist.")
+            return
+            
+        # Serve Verification Checks (Reject root/user directories)
+        if not (target_path / "index.html").exists() and not list(target_path.rglob("*.html")):
+            click.echo(f"\033[91mCritical Error: Path {os.path.abspath(target_path)} does not appear to be a valid JAGUAR clone (no HTML files found).\033[0m")
+            click.echo("Refusing to serve directory to prevent exposing user files.")
+            return
+
+        click.echo("\n\033[96mRunning Pre-Serve Health Check...\033[0m")
+        from jaguar.cloner.validator import CloneValidator
+        validator = CloneValidator(target_path)
+        report = validator._run_static_checks()
+        
+        click.echo("Serve Health:")
+        click.echo(f"  HTML:   {'\033[92mOK' if not report.html.missing else '\033[91mBroken'} ({report.html.resolved}/{report.html.total})\033[0m")
+        click.echo(f"  CSS:    {'\033[92mOK' if not report.css.missing else '\033[91mBroken'} ({report.css.resolved}/{report.css.total})\033[0m")
+        click.echo(f"  JS:     {'\033[92mOK' if not report.js.missing else '\033[91mBroken'} ({report.js.resolved}/{report.js.total})\033[0m")
+        
+        total_assets = report.images.total + report.fonts.total + report.svg.total + report.media.total
+        resolved_assets = report.images.resolved + report.fonts.resolved + report.svg.resolved + report.media.resolved
+        assets_status = '\033[92mOK' if (total_assets == 0 or resolved_assets == total_assets) else '\033[91mBroken'
+        click.echo(f"  Assets: {assets_status} ({resolved_assets}/{total_assets})\033[0m\n")
+
+        server = CloneServer(str(target_path), port=port)
         url = server.start()
-        click.echo(f"Serving {path} at {url}")
+        click.echo(f"Serving {target_path} at {url}")
         click.echo("Press Ctrl+C to stop.")
 
         import time

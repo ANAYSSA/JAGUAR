@@ -5,9 +5,11 @@
 - `jaguar serve <path>` now embeds a native SPA `SPARequestHandler` that cleanly intercepts 404s, returning `index.html` to allow Next.js/React/Vue client routing to execute seamlessly while still natively logging broken `.css`/`.js` fetches to the CLI.
 
 ### Fixed
+- **CRITICAL**: Fixed a severe path-traversal bug where `jaguar serve` without arguments could maliciously serve the user's home or root directory instead of the clone. Serve now explicitly refuses to start unless the target directory contains valid `.html` files.
 - Fixed critical CSS variable parsing where `url()` statements nested inside `var(--prop, url(...))` were ignored.
+- Fixed `url()` and `src=` attributes resolution failing on URL-encoded strings (e.g. `%20` for spaces) and protocol-relative domains (`//`).
 - Fixed an issue where deeply nested `@import` CSS files failed to recursively anchor their child URLs properly.
-- `Clone Health: 100%` is now hard-blocked if any offline console errors or missing Playwright network intercepts fire, preventing false-positive success reporting.
+- `Clone Health: 100%` is now strictly hard-blocked if any offline console errors, visual screenshot mismatches, or missing Playwright network intercepts fire. Missing CSS and JS assets now severely penalize health score.
 
 ## [1.0.9] - 2026-06-04
 ### Added

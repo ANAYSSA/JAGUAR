@@ -163,15 +163,16 @@ class Rebuilder:
             if val.startswith(("data:", "http://", "https://", "javascript:", "mailto:", "tel:", "#")):
                 return
 
+            from urllib.parse import unquote
             # Try to find the file locally
-            local = val.split("?")[0].split("#")[0].lstrip("/")
+            local = unquote(val.split("?")[0].split("#")[0]).lstrip("/")
             if not local:
                 local = "index.html"
 
             target_path = self.clone_dir / local
             if not target_path.exists():
                 # Maybe it is relative to the html file's directory?
-                target_path = (html_path.parent / val).resolve()
+                target_path = (html_path.parent / unquote(val)).resolve()
 
             if not target_path.exists():
                 # Repair broken path by searching the directory
