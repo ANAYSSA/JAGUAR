@@ -206,14 +206,20 @@ class HttpClient:
                     # Capture cookies
                     cookies = []
                     for cookie in self._session.cookie_jar:
+                        secure_val = cookie.get("secure", "")
+                        is_secure = secure_val is True or (isinstance(secure_val, str) and "secure" in secure_val.lower())
+                        
+                        httponly_val = cookie.get("httponly", "")
+                        is_httponly = httponly_val is True or (isinstance(httponly_val, str) and httponly_val != "")
+                        
                         cookies.append(
                             {
                                 "name": cookie.key,
                                 "value": cookie.value,
                                 "domain": cookie.get("domain", ""),
                                 "path": cookie.get("path", "/"),
-                                "secure": "secure" in cookie.get("secure", ""),
-                                "httponly": cookie.get("httponly", "") != "",
+                                "secure": is_secure,
+                                "httponly": is_httponly,
                                 "samesite": cookie.get("samesite", ""),
                             }
                         )
