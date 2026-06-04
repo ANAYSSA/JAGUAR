@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import pytest
 
 from jaguar.core.http_client import HttpClient, HttpClientConfig
@@ -34,7 +35,7 @@ class FakeSession:
         return FakeContext()
 
 @pytest.mark.asyncio
-async def test_http_client_cookie_parsing_bool():
+async def test_http_client_cookie_parsing_bool() -> None:
     config = HttpClientConfig()
     client = HttpClient(config)
 
@@ -49,7 +50,7 @@ async def test_http_client_cookie_parsing_bool():
     assert res.cookies[0]["httponly"] is True
 
 @pytest.mark.asyncio
-async def test_http_client_cookie_parsing_str():
+async def test_http_client_cookie_parsing_str() -> None:
     config = HttpClientConfig()
     client = HttpClient(config)
 

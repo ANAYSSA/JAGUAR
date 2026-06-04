@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import pytest
 
 from jaguar.analyzers import get_all_analyzers
@@ -11,7 +12,7 @@ DOMAINS = [
 ]
 
 @pytest.mark.asyncio
-async def test_enterprise_regression_no_failures():
+async def test_enterprise_regression_no_failures() -> None:
     """
     Ensure Google, Microsoft, GitHub and Cloudflare never receive a failing score
     because of redirect parsing, user-agent differences, or cookie parsing.

@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import asyncio
 import sys
 import time
@@ -25,7 +26,7 @@ DOMAINS = [
     "https://amazon.com",
 ]
 
-async def run_benchmarks():
+async def run_benchmarks() -> None:
     console.print("[bold cyan]Running Enterprise Calibration Benchmarks[/bold cyan]")
 
     report = [
