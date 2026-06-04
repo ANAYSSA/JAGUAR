@@ -1,5 +1,11 @@
-## [1.1.1] - 2026-06-04
+## [1.1.2] - 2026-06-04
 ### Added
+- **Clone Doctor Playwright Integration**: `jaguar clone-doctor <path>` now spins up a headless browser to analyze deep visual failures, printing categorized lists of MIME mismatches, network 404s, and JS exceptions.
+- **Dynamic Local MIME Inference**: Local SPA server (`jaguar serve`) now utilizes `Sec-Fetch-Dest` request headers to perfectly serve extensionless PHP stylesheets from LMS systems (like Moodle) as `text/css`, completely fixing local "unstyled HTML" issues without mutating the file structure.
+- `Clone Health` calculation now severely deducts points if `visual_accuracy` falls below 90%, preventing false positives on visually broken clones.
+- `jaguar serve` static pre-flight check now operates with a strict 5-second timeout, completely resolving startup hangs on extremely deep cloned directory structures.
+
+## [1.1.1] - 2026-06-04
 - Universal Playwright-driven rendering validation: Clone Health is now benchmarked against an actual offline Chromium render instance verifying DOM layout and HTTP 404s dynamically.
 - `jaguar clone-doctor <path>` CLI command to instantly diagnose broken local asset references.
 - `jaguar serve <path>` now embeds a native SPA `SPARequestHandler` that cleanly intercepts 404s, returning `index.html` to allow Next.js/React/Vue client routing to execute seamlessly while still natively logging broken `.css`/`.js` fetches to the CLI.

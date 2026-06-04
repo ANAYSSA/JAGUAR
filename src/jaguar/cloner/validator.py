@@ -55,6 +55,7 @@ class CloneReport:
     final_site_language: str = "Unknown"
     visual_accuracy: float | None = None
     has_rendering_errors: bool = False
+    rendering_error_logs: list[str] = field(default_factory=list)
 
     @property
     def overall_health(self) -> float:
@@ -164,7 +165,10 @@ class CloneValidator:
         logger.info("Clone health: %.1f%%", report.overall_health)
         return report
 
-    def _run_static_checks(self) -> CloneReport:
+    def _run_static_checks(self, timeout: float = 0) -> CloneReport:
+        import time
+        start_time = time.time()
+        
         report = CloneReport()
 
         report.html.total = 1
@@ -178,6 +182,9 @@ class CloneValidator:
         frontend_only_detected = False
 
         for html_file in self.clone_dir.rglob("*.html"):
+            if timeout > 0 and (time.time() - start_time) > timeout:
+                logger.warning("Validation timed out after %.1fs, continuing...", timeout)
+                break
             try:
                 content = html_file.read_text(encoding="utf-8", errors="replace")
                 soup = BeautifulSoup(content, "lxml")
@@ -258,21 +265,25 @@ class CloneValidator:
 
             page = await browser.new_page()
 
-            def handle_console(msg: ConsoleMessage) -> None:
+            def handle_console(msg: "ConsoleMessage") -> None:
                 if msg.type in ("error", "warning") and "Failed to load resource" in msg.text or msg.type == "error":
                     report.has_rendering_errors = True
+                    report.rendering_error_logs.append(f"[Console] {msg.text}")
 
-            def handle_pageerror(err: Error) -> None:
+            def handle_pageerror(err: "Error") -> None:
                 report.has_rendering_errors = True
+                report.rendering_error_logs.append(f"[JS Exception] {err.message}")
 
             def handle_requestfailed(req: "Request") -> None:
                 # 404s to local assets count as rendering errors
                 if req.failure:
                     report.has_rendering_errors = True
+                    report.rendering_error_logs.append(f"[Network] Failed {req.url}: {req.failure}")
 
             def handle_response(res: "Response") -> None:
                 if res.status >= 400:
                     report.has_rendering_errors = True
+                    report.rendering_error_logs.append(f"[HTTP {res.status}] {res.url}")
 
             page.on("console", handle_console)
             page.on("pageerror", handle_pageerror)

@@ -128,6 +128,18 @@ class SPARequestHandler(SimpleHTTPRequestHandler):
         # Suppress standard HTTP logs unless it's an error to keep console clean during SPA testing
         pass
 
+    def guess_type(self, path: str) -> str:
+        """Override MIME type guessing using Sec-Fetch-Dest for extensionless/PHP LMS assets."""
+        dest = self.headers.get("Sec-Fetch-Dest")
+        if dest == "style":
+            return "text/css"
+        if dest == "script":
+            return "application/javascript"
+        if dest == "font":
+            return "font/woff2"
+            
+        return super().guess_type(path)
+
 
 class CloneServer:
     """Simple HTTP server to serve cloned websites locally."""

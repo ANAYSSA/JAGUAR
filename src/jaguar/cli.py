@@ -327,7 +327,12 @@ def clone(url: str, depth: int, pages: int, lang: str, spa: bool, serve: bool, v
 @click.argument("path")
 def clone_doctor(path: str) -> None:
     """Diagnose broken assets in a cloned website."""
+    import asyncio
+    asyncio.run(_doctor(path))
+
+async def _doctor(path: str) -> None:
     from pathlib import Path
+    import click
     click.echo(f"Running clone doctor on: {path}\n")
     
     from jaguar.config import load_config
@@ -349,6 +354,8 @@ def clone_doctor(path: str) -> None:
         
     from jaguar.cloner.validator import CloneValidator
     validator = CloneValidator(clone_dir)
+    
+    click.echo("\033[96mRunning Static Analysis...\033[0m")
     report = validator._run_static_checks()
     
     broken = False
@@ -371,6 +378,28 @@ def clone_doctor(path: str) -> None:
             
     if not broken:
         click.echo("\033[92mAll static assets are perfectly intact!\033[0m")
+        
+    click.echo("\n\033[96mRunning Dynamic Browser Analysis (Playwright)...\033[0m")
+    report = await validator._run_playwright_validation(report, "http://localhost:8080")
+    
+    if report.rendering_error_logs:
+        click.echo(f"\n\033[91mFound {len(report.rendering_error_logs)} rendering issues:\033[0m")
+        for err in report.rendering_error_logs[:15]:
+            # Highlight MIME errors specifically
+            if "MIME type" in err or "stylesheet" in err:
+                click.echo(f"  - \033[93m[MIME Mismatch / CSS parse]\033[0m {err}")
+            elif "[JS Exception]" in err:
+                click.echo(f"  - \033[91m{err}\033[0m")
+            elif "[Network]" in err or "[HTTP" in err:
+                click.echo(f"  - \033[95m{err}\033[0m")
+            else:
+                click.echo(f"  - {err}")
+                
+        if len(report.rendering_error_logs) > 15:
+            click.echo(f"  ... and {len(report.rendering_error_logs)-15} more.")
+            
+    if not report.has_rendering_errors and not broken:
+        click.echo("\n\033[92mClone Doctor found no issues! The clone is visually and structurally healthy.\033[0m")
     else:
         click.echo("\n\033[93mProposed Fixes:\033[0m")
         click.echo("1. Rerun clone with --spa to ensure dynamic assets are fetched.")
@@ -415,7 +444,7 @@ def serve(path: str, port: int) -> None:
         click.echo("\n\033[96mRunning Pre-Serve Health Check...\033[0m")
         from jaguar.cloner.validator import CloneValidator
         validator = CloneValidator(target_path)
-        report = validator._run_static_checks()
+        report = validator._run_static_checks(timeout=5)
         
         click.echo("Serve Health:")
         click.echo(f"  HTML:   {'\033[92mOK' if not report.html.missing else '\033[91mBroken'} ({report.html.resolved}/{report.html.total})\033[0m")
