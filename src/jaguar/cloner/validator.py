@@ -70,19 +70,22 @@ class CloneReport:
             else:
                 score = sum((c.resolved / c.total) * 100 for c in non_empty) / len(non_empty)
                 
-        # Critical penalties
-        if self.has_rendering_errors:
-            score -= 20.0  # Massive penalty for rendering 404s/console errors
-            
-        if self.visual_accuracy is not None and self.visual_accuracy < 90.0:
-            score -= (90.0 - self.visual_accuracy) * 0.5
-            
         # Hard limits based on categories
-        if self.css.total > 0 and self.css.missing:
-            score = min(score, 75.0)
-        if self.js.total > 0 and self.js.missing:
-            score = min(score, 85.0)
+        if self.has_rendering_errors:
+            score = min(score, 95.0)
             
+        if self.css.total > 0 and self.css.missing:
+            score = min(score, 80.0)
+            
+        if self.js.total > 0 and self.js.missing:
+            score = min(score, 80.0)
+            
+        if self.visual_accuracy is not None:
+            if self.visual_accuracy < 80.0:
+                score = min(score, 50.0)
+            elif self.visual_accuracy < 90.0:
+                score = min(score, 70.0)
+                
         return max(0.0, round(score, 1))
 
     @property
@@ -182,8 +185,9 @@ class CloneValidator:
         frontend_only_detected = False
 
         for html_file in self.clone_dir.rglob("*.html"):
+            current_stage = "HTML/Routes"
             if timeout > 0 and (time.time() - start_time) > timeout:
-                logger.warning("Validation timed out after %.1fs, continuing...", timeout)
+                logger.warning("Validation timed out at stage '%s' after %.1fs, continuing...", current_stage, timeout)
                 break
             try:
                 content = html_file.read_text(encoding="utf-8", errors="replace")
@@ -198,15 +202,24 @@ class CloneValidator:
                         continue
                     self._check_asset(html_file, href, report.links)
 
-                # Check CSS
+                current_stage = "CSS"
+                if timeout > 0 and (time.time() - start_time) > timeout:
+                    logger.warning("Validation timed out at stage '%s' after %.1fs, continuing...", current_stage, timeout)
+                    break
                 for link in soup.find_all("link", rel="stylesheet"):
                     self._check_asset(html_file, link.get("href"), report.css)
 
-                # Check JS
+                current_stage = "JS"
+                if timeout > 0 and (time.time() - start_time) > timeout:
+                    logger.warning("Validation timed out at stage '%s' after %.1fs, continuing...", current_stage, timeout)
+                    break
                 for script in soup.find_all("script", src=True):
                     self._check_asset(html_file, script.get("src"), report.js)
 
-                # Check Images
+                current_stage = "Assets"
+                if timeout > 0 and (time.time() - start_time) > timeout:
+                    logger.warning("Validation timed out at stage '%s' after %.1fs, continuing...", current_stage, timeout)
+                    break
                 for img in soup.find_all("img", src=True):
                     src = img.get("src")
                     if src and src.endswith(".svg"):
@@ -214,11 +227,9 @@ class CloneValidator:
                     else:
                         self._check_asset(html_file, src, report.images)
 
-                # Check Manifest
                 for link in soup.find_all("link", rel="manifest"):
                     self._check_asset(html_file, link.get("href"), report.manifest)
 
-                # Check Media
                 for tag in soup.find_all(["video", "audio", "source"]):
                     self._check_asset(html_file, tag.get("src"), report.media)
 
@@ -229,7 +240,11 @@ class CloneValidator:
             logger.warning("\n[!] Frontend-only clone detected. Dynamic functionality depends on backend services and may not work offline.\n")
 
         # Check fonts referenced in CSS files
+        current_stage = "Fonts/CSS Processing"
         for css_file in self.clone_dir.rglob("*.css"):
+            if timeout > 0 and (time.time() - start_time) > timeout:
+                logger.warning("Validation timed out at stage '%s' after %.1fs, continuing...", current_stage, timeout)
+                break
             try:
                 content = css_file.read_text(encoding="utf-8", errors="replace")
                 font_urls = re.findall(r"@font-face[^}]*?url\(\s*['\"]?([^'\")\s]+)['\"]?\s*\)", content)

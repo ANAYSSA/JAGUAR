@@ -186,12 +186,15 @@ class ClonerEngine:
                     for _ in range(self.concurrency)
                 ]
 
-                # Wait for queues to empty with timeout protection
+                # Start deadlock monitor
+                monitor_task = asyncio.create_task(self._monitor_deadlock(page_workers + asset_workers))
+
+                # Wait for queues to empty
                 try:
-                    await asyncio.wait_for(self._queue.join(), timeout=30)
-                    await asyncio.wait_for(self._assets_queue.join(), timeout=30)
-                except TimeoutError:
-                    logger.warning("Clone queues timed out during shutdown. Forcing exit.")
+                    await self._queue.join()
+                    await self._assets_queue.join()
+                finally:
+                    monitor_task.cancel()
 
                 # Cancel workers
                 for w in page_workers + asset_workers:
@@ -269,6 +272,41 @@ class ClonerEngine:
             logger.info("Clone health: %.1f%%", self.clone_report.overall_health)
         except Exception as e:
             logger.warning("Validation failed: %s", e)
+
+    async def _monitor_deadlock(self, workers: list[asyncio.Task[Any]]) -> None:
+        """Monitor queues and workers to detect infinite clone deadlocks."""
+        last_visited = 0
+        last_assets = 0
+        stalls = 0
+        
+        while True:
+            await asyncio.sleep(1)
+            current_visited = len(self._visited)
+            current_assets = len(self._assets_visited)
+            
+            if current_visited == last_visited and current_assets == last_assets and self._queue.empty() and self._assets_queue.empty():
+                stalls += 1
+            else:
+                stalls = 0
+                
+            if stalls >= 15:
+                logger.error("\n\033[91m[DEADLOCK DETECTED] Clone stalled for 15s!\033[0m")
+                logger.error("Active tasks: %d", len(asyncio.all_tasks()))
+                logger.error("Current URL: %s", getattr(self, 'current_url', 'Unknown'))
+                logger.error("Dumping pending futures and forcing exit...")
+                for w in workers:
+                    w.cancel()
+                # Unblock the join
+                while not self._queue.empty():
+                    self._queue.get_nowait()
+                    self._queue.task_done()
+                while not self._assets_queue.empty():
+                    self._assets_queue.get_nowait()
+                    self._assets_queue.task_done()
+                break
+                
+            last_visited = current_visited
+            last_assets = current_assets
 
     async def _page_worker(self, base_dir: Path) -> None:
         """Worker that processes HTML pages."""
@@ -432,6 +470,16 @@ class ClonerEngine:
 
                 local_path = self._url_to_local_path(url, base_dir, is_html=False)
                 await self._save_file(local_path, content)
+                
+                # Save metadata for LMS / Server
+                meta = {
+                    "Content-Type": content_type,
+                    "Content-Encoding": response.headers.get("Content-Encoding", ""),
+                    "Cache-Control": response.headers.get("Cache-Control", "")
+                }
+                import json
+                meta_path = local_path.with_name(local_path.name + ".meta.json")
+                await self._save_file(meta_path, json.dumps(meta).encode("utf-8"))
 
         except Exception as e:
             logger.debug("Failed to download asset %s: %s", url, e)

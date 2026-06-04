@@ -325,12 +325,13 @@ def clone(url: str, depth: int, pages: int, lang: str, spa: bool, serve: bool, v
 
 @cli.command(name="clone-doctor")
 @click.argument("path")
-def clone_doctor(path: str) -> None:
+@click.option("--deep", is_flag=True, help="Run deep Playwright validation for rendering issues")
+def clone_doctor(path: str, deep: bool) -> None:
     """Diagnose broken assets in a cloned website."""
     import asyncio
-    asyncio.run(_doctor(path))
+    asyncio.run(_doctor(path, deep))
 
-async def _doctor(path: str) -> None:
+async def _doctor(path: str, deep: bool) -> None:
     from pathlib import Path
     import click
     click.echo(f"Running clone doctor on: {path}\n")
@@ -379,32 +380,38 @@ async def _doctor(path: str) -> None:
     if not broken:
         click.echo("\033[92mAll static assets are perfectly intact!\033[0m")
         
-    click.echo("\n\033[96mRunning Dynamic Browser Analysis (Playwright)...\033[0m")
-    report = await validator._run_playwright_validation(report, "http://localhost:8080")
-    
-    if report.rendering_error_logs:
-        click.echo(f"\n\033[91mFound {len(report.rendering_error_logs)} rendering issues:\033[0m")
-        for err in report.rendering_error_logs[:15]:
-            # Highlight MIME errors specifically
-            if "MIME type" in err or "stylesheet" in err:
-                click.echo(f"  - \033[93m[MIME Mismatch / CSS parse]\033[0m {err}")
-            elif "[JS Exception]" in err:
-                click.echo(f"  - \033[91m{err}\033[0m")
-            elif "[Network]" in err or "[HTTP" in err:
-                click.echo(f"  - \033[95m{err}\033[0m")
-            else:
-                click.echo(f"  - {err}")
+    if deep:
+        click.echo("\n\033[96mRunning Deep Dynamic Browser Analysis (Playwright)...\033[0m")
+        report = await validator._run_playwright_validation(report, "http://localhost:8080")
+        
+        if report.rendering_error_logs:
+            click.echo(f"\n\033[91mFound {len(report.rendering_error_logs)} rendering issues:\033[0m")
+            for err in report.rendering_error_logs[:15]:
+                if "MIME type" in err or "stylesheet" in err:
+                    path = err.split("Failed to load resource:")[-1].strip() if "Failed to load resource:" in err else err
+                    click.echo(f"\n\033[93mCSS/MIME Failure:\033[0m\n{path}\nReason:\nServed with incorrect MIME type or blocked by CORB.")
+                elif "[JS Exception]" in err:
+                    click.echo(f"\n\033[91mJS Exception:\033[0m\n{err.replace('[JS Exception]', '').strip()}")
+                elif "[Network]" in err or "[HTTP" in err:
+                    click.echo(f"\n\033[95mNetwork/Route Failure:\033[0m\n{err}")
+                else:
+                    click.echo(f"\n  - {err}")
+                    
+            if len(report.rendering_error_logs) > 15:
+                click.echo(f"\n  ... and {len(report.rendering_error_logs)-15} more.")
                 
-        if len(report.rendering_error_logs) > 15:
-            click.echo(f"  ... and {len(report.rendering_error_logs)-15} more.")
-            
-    if not report.has_rendering_errors and not broken:
-        click.echo("\n\033[92mClone Doctor found no issues! The clone is visually and structurally healthy.\033[0m")
+        if not report.has_rendering_errors and not broken:
+            click.echo("\n\033[92mClone Doctor found no issues! The clone is visually and structurally healthy.\033[0m")
+        else:
+            click.echo("\n\033[93mProposed Fixes:\033[0m")
+            click.echo("1. Rerun clone with --spa to ensure dynamic assets are fetched.")
+            click.echo("2. Check network connectivity during cloning.")
+            click.echo("3. Run `jaguar serve <path>` to observe real-time 404 network errors in the console.")
     else:
-        click.echo("\n\033[93mProposed Fixes:\033[0m")
-        click.echo("1. Rerun clone with --spa to ensure dynamic assets are fetched.")
-        click.echo("2. Check network connectivity during cloning.")
-        click.echo("3. Run `jaguar serve <path>` to observe real-time 404 network errors in the console.")
+        if broken:
+            click.echo("\n\033[93mProposed Fixes:\033[0m")
+            click.echo("1. Rerun clone with --spa to ensure dynamic assets are fetched.")
+            click.echo("2. Run `jaguar clone-doctor <path> --deep` to perform dynamic Playwright validation.")
 
 
 @cli.command()

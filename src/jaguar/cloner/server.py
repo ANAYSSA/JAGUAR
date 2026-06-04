@@ -35,24 +35,24 @@ mimetypes.add_type("image/avif", ".avif")
 
 
 def detect_entry_point(directory: str) -> str | None:
-    """Detect the main entry page of a cloned website."""
+    """Detect the main entry page of a cloned website by size."""
     root = Path(directory)
 
-    # Check root index.html
-    if (root / "index.html").exists():
-        return None  # Default serving works fine
+    # Search for known primary entry files recursively
+    candidates = []
+    for name in ["index.html", "home.html", "default.html", "main.html", "app.html"]:
+        candidates.extend(root.rglob(name))
+        
+    if candidates:
+        # Pick the one with the largest file size
+        best = max(candidates, key=lambda p: p.stat().st_size)
+        return str(best.relative_to(root)).replace("\\", "/")
 
-    # Search for index.html in subdirectories (prefer shallowest)
-    indexes = sorted(root.rglob("index.html"), key=lambda p: len(p.parts))
-    if indexes:
-        rel = indexes[0].relative_to(root)
-        return str(rel).replace("\\", "/")
-
-    # Search for any HTML file
-    html_files = sorted(root.rglob("*.html"), key=lambda p: len(p.parts))
+    # Fallback to ANY HTML file
+    html_files = list(root.rglob("*.html"))
     if html_files:
-        rel = html_files[0].relative_to(root)
-        return str(rel).replace("\\", "/")
+        best = max(html_files, key=lambda p: p.stat().st_size)
+        return str(best.relative_to(root)).replace("\\", "/")
 
     return None
 
@@ -62,10 +62,13 @@ def ensure_root_index(directory: str) -> str | None:
     root = Path(directory)
     root_index = root / "index.html"
 
-    if root_index.exists():
-        return None
-
     entry = detect_entry_point(directory)
+    
+    if not entry and not root_index.exists():
+        raise ValueError(f"No valid HTML entry point found in {directory}. The directory might be empty or not a cloned website.")
+        
+    if root_index.exists() and not entry:
+        return None
     if entry:
         html = f"""<!DOCTYPE html>
 <html>
@@ -120,7 +123,37 @@ class SPARequestHandler(SimpleHTTPRequestHandler):
                 except Exception:
                     pass
 
-            print(f"\033[91m[404] Route Not Found:\033[0m {self.path}")
+            print(f"\033[91m[404] Route Not Found (Offline Placeholder served):\033[0m {self.path}")
+            
+            # Serve Generated Offline Placeholder
+            offline_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Offline Placeholder - JAGUAR</title>
+    <style>
+        body {{ font-family: system-ui, -apple-system, sans-serif; text-align: center; padding: 100px 20px; color: #333; }}
+        h1 {{ color: #e53e3e; }}
+        .box {{ max-width: 600px; margin: 0 auto; background: #f7fafc; padding: 40px; border-radius: 8px; border: 1px solid #e2e8f0; }}
+        code {{ background: #edf2f7; padding: 2px 6px; border-radius: 4px; }}
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h1>Offline Route Triggered</h1>
+        <p>The clone navigated to a route that was not fully downloaded or requires a backend server:</p>
+        <p><code>{self.path}</code></p>
+        <p>This offline placeholder prevents the browser from crashing into a raw 404 error.</p>
+        <a href="/">Return to Home</a>
+    </div>
+</body>
+</html>"""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(offline_html.encode('utf-8'))))
+            self.end_headers()
+            self.wfile.write(offline_html.encode('utf-8'))
+            return
 
         super().send_error(code, message, explain)
 
@@ -129,7 +162,18 @@ class SPARequestHandler(SimpleHTTPRequestHandler):
         pass
 
     def guess_type(self, path: str) -> str:
-        """Override MIME type guessing using Sec-Fetch-Dest for extensionless/PHP LMS assets."""
+        """Override MIME type guessing using .meta.json and Sec-Fetch-Dest."""
+        try:
+            import os, json
+            meta_path = path + ".meta.json"
+            if os.path.exists(meta_path):
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                if meta.get("Content-Type"):
+                    return meta["Content-Type"].split(";")[0]
+        except Exception:
+            pass
+            
         dest = self.headers.get("Sec-Fetch-Dest")
         if dest == "style":
             return "text/css"
@@ -139,6 +183,22 @@ class SPARequestHandler(SimpleHTTPRequestHandler):
             return "font/woff2"
             
         return super().guess_type(path)
+
+    def end_headers(self) -> None:
+        try:
+            import os, json
+            path = self.translate_path(self.path)
+            meta_path = path + ".meta.json"
+            if os.path.exists(meta_path):
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                if meta.get("Content-Encoding"):
+                    self.send_header("Content-Encoding", meta["Content-Encoding"])
+                if meta.get("Cache-Control"):
+                    self.send_header("Cache-Control", meta["Cache-Control"])
+        except Exception:
+            pass
+        super().end_headers()
 
 
 class CloneServer:

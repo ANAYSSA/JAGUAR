@@ -1,5 +1,14 @@
-## [1.1.2] - 2026-06-04
+## [1.1.3] - 2026-06-04
 ### Added
+- **Infinite Clone Deadlock Recovery**: Added a 15-second background stall monitor to explicitly trap and forcefully exit unresponsive network fetches or Playwright execution states, fully eliminating eternal hangs during deep LMS clones.
+- **Dynamic Entry Point Detection**: Instead of stubbornly failing when `index.html` is absent, the local `jaguar serve` engine now securely scans for `home.html`, `default.html`, `main.html`, or `app.html`, prioritizing the richest entry point by file size.
+- **Offline SPA Routing Fallbacks**: 404 routes requested dynamically by client-side SPAs that lack a true `index.html` fallback now render a secure generated Offline Placeholder page instead of triggering generic `SimpleHTTPRequestHandler` server 404s.
+- **Deep Clone Doctor Flag**: `jaguar clone-doctor <path> --deep` explicitly filters and highlights Playwright rendering outputs distinguishing pure Network 404s from CSS/MIME rendering failures or JS Exceptions.
+- **LMS Metadata Persistence**: The cloning engine natively writes `.meta.json` sidecars next to downloaded assets. `jaguar serve` intelligently reads these to restore original `Content-Type`, `Content-Encoding`, and `Cache-Control` headers, achieving flawless offline emulation of extensionless PHP asset pipelines (like Moodle's `pluginfile.php`).
+- **Granular Health Penalties**: `CloneValidator` now applies hard ceilings (e.g. Any JS error restricts health to max 80%, low visual accuracy aggressively clamps score < 70%).
+- Universal `Accept-Language` headers mirroring the user's OS native environment are injected into Playwright contexts and HTTP fetches.
+
+## [1.1.2] - 2026-06-04
 - **Clone Doctor Playwright Integration**: `jaguar clone-doctor <path>` now spins up a headless browser to analyze deep visual failures, printing categorized lists of MIME mismatches, network 404s, and JS exceptions.
 - **Dynamic Local MIME Inference**: Local SPA server (`jaguar serve`) now utilizes `Sec-Fetch-Dest` request headers to perfectly serve extensionless PHP stylesheets from LMS systems (like Moodle) as `text/css`, completely fixing local "unstyled HTML" issues without mutating the file structure.
 - `Clone Health` calculation now severely deducts points if `visual_accuracy` falls below 90%, preventing false positives on visually broken clones.
