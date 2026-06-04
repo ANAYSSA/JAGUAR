@@ -197,8 +197,8 @@ def clone(url: str, depth: int, pages: int, spa: bool, serve: bool, verify: bool
         if engine.clone_report:
             report = engine.clone_report
             click.secho(f"Clone Health: {report.overall_health}%", fg="green" if report.overall_health >= 90 else "yellow")
-            click.echo(f"  HTML: {report.html.percentage}%  CSS: {report.css.percentage}%  JS: {report.js.percentage}%")
-            click.echo(f"  Fonts: {report.fonts.percentage}%  Images: {report.images.percentage}%")
+            click.echo(f"  CSS: {report.css.percentage}%  JS: {report.js.percentage}%  Images: {report.images.percentage}%")
+            click.echo(f"  Fonts: {report.fonts.percentage}%  SVG: {report.svg.percentage}%  Media: {report.media.percentage}%")
             if report.total_missing > 0:
                 click.secho(f"  Missing Resources: {report.total_missing}", fg="yellow")
             if report.is_spa:

@@ -14,6 +14,10 @@ import struct
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from playwright.async_api import ConsoleMessage, Error, Request
 
 logger = logging.getLogger("jaguar.cloner.visual_compare")
 
@@ -111,8 +115,6 @@ class VisualCompare:
                 logger.info("Capturing screenshot of clone on port %d", local_port)
                 page = await browser.new_page()
 
-                from playwright.async_api import ConsoleMessage, Error, Request
-                
                 def handle_console(msg: ConsoleMessage) -> None:
                     if msg.type in ("error", "warning") and "Failed to load resource" in msg.text:
                         result.console_errors.append(msg.text)

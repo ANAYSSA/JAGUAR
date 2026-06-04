@@ -23,6 +23,12 @@ class CategoryHealth:
     resolved: int = 0
     missing: list[str] = field(default_factory=list)
 
+    @property
+    def percentage(self) -> float:
+        if self.total == 0:
+            return 100.0
+        return round((self.resolved / self.total) * 100, 1)
+
 
 @dataclass
 class CloneReport:
