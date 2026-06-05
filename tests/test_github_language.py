@@ -40,9 +40,16 @@ async def test_github_language_determination_and_sidecar() -> None:
         mock_http = MagicMock()
         mock_http.get = AsyncMock(return_value=mock_response)
         
+        async def mock_pw_impl(target_dir):
+            try:
+                engine._queue.get_nowait()
+                engine._queue.task_done()
+            except Exception:
+                pass
+
         # We patch HttpClient and other post clone phases to avoid real operations
         with patch("jaguar.cloner.engine.HttpClient") as mock_http_cls, \
-             patch.object(engine, "_page_worker", AsyncMock()) as mock_pw, \
+             patch.object(engine, "_page_worker", side_effect=mock_pw_impl) as mock_pw, \
              patch.object(engine, "_asset_worker", AsyncMock()) as mock_aw, \
              patch.object(engine, "_post_clone", AsyncMock()) as mock_pc:
              

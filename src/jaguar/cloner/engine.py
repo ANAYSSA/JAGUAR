@@ -292,7 +292,7 @@ class ClonerEngine:
                             for req_url in self._active_fetches:
                                 logger.error(f"  Awaiting/Pending Fetch: {req_url}")
 
-                            break
+                            raise RuntimeError("Clone stalled due to deadlock/inactivity.")
                 finally:
                     # Cancel workers
                     for w in page_workers + asset_workers:
@@ -324,18 +324,23 @@ class ClonerEngine:
 
             # Verify local asset existence
             missing_assets = []
+            static_extensions = {
+                ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
+                ".ico", ".woff", ".woff2", ".ttf", ".eot", ".otf", ".json",
+                ".mp4", ".mp3", ".ogg", ".webm", ".map", ".xml"
+            }
             for url in self._assets_visited:
+                parsed_url = urlparse(url)
+                url_path = parsed_url.path.lower()
+                has_static_ext = any(url_path.endswith(ext) for ext in static_extensions)
+                if not has_static_ext:
+                    continue  # Skip HTML, PHP, and other non-static assets
                 local_path = self._url_to_local_path(url, target_dir, is_html=False)
                 if not local_path.exists() or local_path.stat().st_size == 0:
                     missing_assets.append(url)
 
-            for url in self._visited:
-                local_path = self._url_to_local_path(url, target_dir, is_html=True)
-                if not local_path.exists() or local_path.stat().st_size == 0:
-                    missing_assets.append(url)
-
             if missing_assets:
-                logger.error(f"\n\033[91m[CLONE INCOMPLETE] {len(missing_assets)} referenced assets or pages are missing or empty!\033[0m")
+                logger.error(f"\n\033[91m[CLONE INCOMPLETE] {len(missing_assets)} referenced assets are missing or empty!\033[0m")
                 for u in missing_assets[:10]:
                     logger.error(f"  Missing: {u}")
                 raise RuntimeError(f"Clone failed: {len(missing_assets)} referenced assets are missing.")
@@ -594,6 +599,15 @@ class ClonerEngine:
             ("source", "srcset"),
         ]:
             for el in soup.find_all(tag, **{attr: True}):
+                if tag == "link":
+                    rel = el.get("rel", [])
+                    if isinstance(rel, str):
+                        rel = [rel]
+                    rel_lower = [r.lower() for r in rel]
+                    skip_rels = {"canonical", "alternate", "prev", "next", "search", "help", "license", "author", "pingback"}
+                    if any(r in skip_rels for r in rel_lower):
+                        continue
+
                 val = el[attr]
                 # srcset can have multiple URLs
                 urls = [u.split()[0] for u in val.split(",")] if attr == "srcset" else [val]

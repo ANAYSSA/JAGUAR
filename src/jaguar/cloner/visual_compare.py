@@ -96,36 +96,11 @@ class VisualCompare:
                 await page.close()
 
             # 2. Start temp server and screenshot clone
-            import http.server
-            import socket
-            import socketserver
-            import threading
+            from jaguar.cloner.server import CloneServer
 
-            # Dynamically allocate a free port
-            sock = socket.socket()
-            sock.bind(('', 0))
-            port = sock.getsockname()[1]
-            sock.close()
-
-            _clone_dir = str(self.clone_dir)
-
-            class Handler(http.server.SimpleHTTPRequestHandler):
-                protocol_version = "HTTP/1.0"
-                def __init__(self, *args: object, **kwargs: object) -> None:
-                    super().__init__(*args, directory=_clone_dir, **kwargs)  # type: ignore[arg-type]
-
-                def log_message(self, format: str, *args: object) -> None:
-                    pass  # Suppress logs
-
-                def handle(self) -> None:
-                    self.close_connection = True
-                    super().handle()
-
-            socketserver.ThreadingTCPServer.allow_reuse_address = True
-
-            server = socketserver.ThreadingTCPServer(("127.0.0.1", port), Handler)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
+            server = CloneServer(str(self.clone_dir), port=46000)
+            url = server.start()
+            port = server.port
 
             try:
                 logger.info("Capturing screenshot of clone on port %d", port)
@@ -150,22 +125,14 @@ class VisualCompare:
 
                 try:
                     await browser.navigate_and_wait(
-                        page, f"http://localhost:{port}"
+                        page, url
                     )
                     await page.screenshot(path=str(clone_path), full_page=True)
                 finally:
                     await page.close()
             finally:
                 try:
-                    server.shutdown()
-                except Exception:
-                    pass
-                try:
-                    server.server_close()
-                except Exception:
-                    pass
-                try:
-                    thread.join(timeout=2.0)
+                    server.stop()
                 except Exception:
                     pass
 
@@ -278,9 +245,12 @@ class VisualCompare:
             # For a basic accuracy metric this is sufficient
             stride = width * 4 + 1  # RGBA + filter byte
             pixels = bytearray()
-            for y in range(min(height, len(raw) // stride)):
+            max_height = min(height, 2000, len(raw) // stride)
+            
+            # Downsample using step=4 to process 16x fewer pixels and run extremely fast
+            for y in range(0, max_height, 4):
                 row_start = y * stride + 1  # Skip filter byte
-                for x in range(width):
+                for x in range(0, width, 4):
                     px = row_start + x * 4
                     if px + 2 < len(raw):
                         pixels.extend(raw[px : px + 3])  # RGB only

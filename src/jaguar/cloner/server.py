@@ -581,10 +581,12 @@ class CloneServer:
                 return
             self._stopped = True
 
-            # 1. shutdown serve_forever loop first, only if serving
+            # 1. shutdown serve_forever loop first, only if serving, using a timeout thread
             if self._serving:
                 try:
-                    server.shutdown()
+                    shutdown_thread = threading.Thread(target=server.shutdown, daemon=True)
+                    shutdown_thread.start()
+                    shutdown_thread.join(timeout=1.0)
                 except Exception:
                     pass
             # 2. close socket
@@ -597,7 +599,7 @@ class CloneServer:
             # 3. wait for thread to terminate to ensure no thread runs after close
             if self.thread:
                 try:
-                    self.thread.join(timeout=2.0)
+                    self.thread.join(timeout=1.0)
                 except Exception:
                     pass
                 self.thread = None

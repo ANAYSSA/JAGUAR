@@ -132,8 +132,8 @@ async def test_deadlock_detection_real_trigger(tmp_path: Path) -> None:
          patch.object(engine, "_post_clone", AsyncMock()), \
          patch("asyncio.sleep", side_effect=fast_sleep):
          
-         # Run the clone. It should stall and then exit gracefully
-         res = await engine.clone("http://localhost:12345")
-         assert res is not None
-         assert Path(res).exists()
+         # Run the clone. It should stall and then raise RuntimeError
+         with pytest.raises(RuntimeError) as exc_info:
+             await engine.clone("http://localhost:12345")
+         assert "stalled due to deadlock/inactivity" in str(exc_info.value)
          assert sleep_count >= 15
