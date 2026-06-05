@@ -132,98 +132,295 @@ def ensure_root_index(directory: str) -> str | None:
     return entry
 
 
-class SPARequestHandler(SimpleHTTPRequestHandler):
-    """Custom handler for SPA routing and asset error logging."""
-
-    def send_head(self) -> Any:
-        """Override send_head to support suffix-based SPA asset resolution and fallback routing."""
-        path = self.translate_path(self.path)
-
-        # If it exists, let the superclass handle it
-        if os.path.exists(path):
-            if os.path.isdir(path):
-                # Check for index pages
-                for index in self.index_pages:
-                    index_file = os.path.join(path, index)
-                    if os.path.exists(index_file):
-                        return super().send_head()
-                # No index file, trigger list_directory which will return 403
-                return super().send_head()
-            return super().send_head()
-
-        # It does not exist. Check if it's an asset.
-        clean_path = self.path.split('?')[0].split('#')[0]
-        ext = Path(clean_path).suffix.lower()
-        asset_exts = {
-            '.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.woff2',
-            '.ttf', '.json', '.webmanifest', '.ico', '.map', '.mp4', '.mp3', '.ogg',
-            '.wav', '.webm', '.xml'
-        }
-
-        # Suffix-matching fallback asset resolver:
-        # If /nested/path/static/js/main.js doesn't exist, check if static/js/main.js or js/main.js or main.js exists.
-        parts = [p for p in clean_path.split("/") if p]
-        for i in range(1, len(parts)):
-            suffix_path = "/".join(parts[i:])
-            resolved_local = Path(self.directory) / suffix_path
-            if resolved_local.exists() and resolved_local.is_file():
-                # Serve the resolved suffix file
-                self.path = "/" + suffix_path
-                return super().send_head()
-
-        # If it is an asset but not found anywhere, trigger 404
-        if ext in asset_exts:
-            print(f"\033[91m[404] Broken Asset:\033[0m {self.path}")
-            self.send_error(404, f"Asset not found: {self.path}")
-            return None
-
-        # Otherwise, assume it's a client-side SPA route and return index.html
-        index_path = Path(self.directory) / "index.html"
-        if index_path.exists():
+def decompress_data(data: bytes, encoding: str) -> bytes:
+    encoding = encoding.strip().lower()
+    if encoding == "gzip" or data.startswith(b"\x1f\x8b"):
+        import gzip
+        try:
+            return gzip.decompress(data)
+        except Exception:
+            pass
+    if encoding == "deflate" or data.startswith(b"\x78\x01") or data.startswith(b"\x78\x9c") or data.startswith(b"\x78\xda"):
+        import zlib
+        try:
+            return zlib.decompress(data)
+        except Exception:
             try:
-                self.path = "/index.html"
-                return super().send_head()
+                return zlib.decompress(data, -15)
+            except Exception:
+                pass
+    if encoding == "br":
+        try:
+            import brotli  # type: ignore[import-untyped] # pyright: ignore[reportMissingImports]
+            return brotli.decompress(data)  # type: ignore[no-any-return]
+        except Exception:
+            try:
+                import brotlicffi as brotli  # type: ignore[import-not-found] # pyright: ignore[reportMissingImports]
+                return brotli.decompress(data)  # type: ignore[no-any-return]
+            except Exception:
+                pass
+    return data
+
+
+class SPARequestHandler(SimpleHTTPRequestHandler):
+    """Custom handler for SPA routing, asset error logging, decompression, locale preservation, and AJAX caching."""
+    protocol_version = "HTTP/1.0"
+
+    def handle(self) -> None:
+        self.close_connection = True
+        super().handle()
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.end_headers()
+
+    def do_POST(self) -> None:
+        """Handle POST requests, serving them from AJAX cache if matched."""
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = ""
+        if content_length > 0:
+            try:
+                post_data = self.rfile.read(content_length).decode('utf-8', errors='ignore')
             except Exception:
                 pass
 
-        # Serve offline placeholder
-        print(f"\033[91m[404] Route Not Found (Offline Placeholder served):\033[0m {self.path}")
-        self.send_error(404)
-        return None
-
-    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
-        if code == 404:
-            # Serve Generated Offline Placeholder
-            offline_html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Offline Placeholder - JAGUAR</title>
-    <style>
-        body {{ font-family: system-ui, -apple-system, sans-serif; text-align: center; padding: 100px 20px; color: #333; }}
-        h1 {{ color: #e53e3e; }}
-        .box {{ max-width: 600px; margin: 0 auto; background: #f7fafc; padding: 40px; border-radius: 8px; border: 1px solid #e2e8f0; }}
-        code {{ background: #edf2f7; padding: 2px 6px; border-radius: 4px; }}
-    </style>
-</head>
-<body>
-    <div class="box">
-        <h1>Offline Route Triggered</h1>
-        <p>The clone navigated to a route that was not fully downloaded or requires a backend server:</p>
-        <p><code>{self.path}</code></p>
-        <p>This offline placeholder prevents the browser from crashing into a raw 404 error.</p>
-        <a href="/">Return to Home</a>
-    </div>
-</body>
-</html>"""
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html")
-            self.send_header("Content-Length", str(len(offline_html.encode('utf-8'))))
-            self.end_headers()
-            self.wfile.write(offline_html.encode('utf-8'))
+        if self._serve_from_ajax_cache("POST", post_data):
             return
 
-        super().send_error(code, message, explain)
+        self.send_error(404, f"POST route not in offline cache: {self.path}")
+
+    def _serve_from_ajax_cache(self, method: str, post_data: str) -> bool:
+        """Search in .jaguar-ajax-cache for a matching request and serve it."""
+        import hashlib
+        import json
+        from pathlib import Path
+        from urllib.parse import urlparse
+
+        ajax_cache_dir = Path(self.directory) / ".jaguar-ajax-cache"
+        if not ajax_cache_dir.exists():
+            return False
+
+        parsed_url = urlparse(self.path)
+        cache_key_src = f"{parsed_url.path}?{parsed_url.query}\n{method.upper()}\n{post_data}"
+        cache_hash = hashlib.sha256(cache_key_src.encode("utf-8")).hexdigest()
+
+        meta_file = ajax_cache_dir / f"{cache_hash}.meta.json"
+        body_file = ajax_cache_dir / f"{cache_hash}.body"
+
+        if meta_file.exists() and body_file.exists():
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                body_bytes = body_file.read_bytes()
+                self.send_response(meta.get("status", 200))
+                self.send_header("Content-Type", meta.get("content_type", "application/json"))
+                self.send_header("Content-Length", str(len(body_bytes)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+                self.send_header("Access-Control-Allow-Headers", "*")
+                self.end_headers()
+                self.wfile.write(body_bytes)
+                logger.debug(f"AJAX cache hit: {method} {self.path}")
+                return True
+            except Exception as e:
+                logger.warning("Failed to serve AJAX cache: %s", e)
+
+        # Fallback: ignore query string/post data, match path only
+        try:
+            for p in ajax_cache_dir.glob("*.meta.json"):
+                try:
+                    meta = json.loads(p.read_text(encoding="utf-8"))
+                    if meta.get("method") == method.upper():
+                        cached_parsed = urlparse(meta.get("url", ""))
+                        if cached_parsed.path == parsed_url.path:
+                            body_path = p.with_suffix(".body")
+                            if body_path.exists():
+                                body_bytes = body_path.read_bytes()
+                                self.send_response(meta.get("status", 200))
+                                self.send_header("Content-Type", meta.get("content_type", "application/json"))
+                                self.send_header("Content-Length", str(len(body_bytes)))
+                                self.send_header("Access-Control-Allow-Origin", "*")
+                                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+                                self.send_header("Access-Control-Allow-Headers", "*")
+                                self.end_headers()
+                                self.wfile.write(body_bytes)
+                                logger.debug(f"AJAX cache path fallback hit: {method} {self.path}")
+                                return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return False
+
+    def send_head(self) -> Any:
+        """Override send_head to support decompression, language preservation, and SPA resolution."""
+        # 1. First check GET AJAX cache
+        if self._serve_from_ajax_cache("GET", ""):
+            return None
+
+        path = self.translate_path(self.path)
+        import re
+
+        # 2. Suffix matching if the path does not exist directly
+        if not os.path.exists(path):
+            clean_path = self.path.split('?')[0].split('#')[0]
+            ext = Path(clean_path).suffix.lower()
+            asset_exts = {
+                '.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.woff2',
+                '.ttf', '.json', '.webmanifest', '.ico', '.map', '.mp4', '.mp3', '.ogg',
+                '.wav', '.webm', '.xml'
+            }
+
+            parts = [p for p in clean_path.split("/") if p]
+            suffix_found = False
+            for i in range(1, len(parts)):
+                suffix_path = "/".join(parts[i:])
+                resolved_local = Path(self.directory) / suffix_path
+                if resolved_local.exists() and resolved_local.is_file():
+                    self.path = "/" + suffix_path
+                    path = self.translate_path(self.path)
+                    suffix_found = True
+                    break
+
+            if not suffix_found:
+                if ext in asset_exts:
+                    print(f"\033[91m[404] Broken Asset:\033[0m {self.path}")
+                    self.send_error(404, f"Asset not found: {self.path}")
+                    return None
+
+                # Fallback to SPA root index
+                index_path = Path(self.directory) / "index.html"
+                if index_path.exists():
+                    self.path = "/index.html"
+                    path = self.translate_path(self.path)
+                else:
+                    print(f"\033[91m[404] Route Not Found (Offline Placeholder served):\033[0m {self.path}")
+                    self.send_error(404)
+                    return None
+
+        # 3. Serving file (decompress on the fly, inject locale, headers)
+        if os.path.exists(path) and os.path.isfile(path):
+            content_type = self.guess_type(path)
+            content_encoding = ""
+            cache_control = ""
+
+            try:
+                import json
+                meta_path = path + ".meta.json"
+                if os.path.exists(meta_path):
+                    with open(meta_path) as f:
+                        meta = json.load(f)
+                    content_encoding = meta.get("Content-Encoding", "").strip().lower()
+                    cache_control = meta.get("Cache-Control", "")
+            except Exception:
+                pass
+
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+            except OSError:
+                self.send_error(404, "File not found")
+                return None
+
+            # Sniff compression if not specified in metadata
+            is_compressed = False
+            if content_encoding in ("gzip", "deflate", "br"):
+                is_compressed = True
+            elif data.startswith(b"\x1f\x8b"):
+                content_encoding = "gzip"
+                is_compressed = True
+            elif data.startswith(b"\x78\x01") or data.startswith(b"\x78\x9c") or data.startswith(b"\x78\xda"):
+                content_encoding = "deflate"
+                is_compressed = True
+
+            # Decompress if needed
+            if is_compressed:
+                decompressed = decompress_data(data, content_encoding)
+                if decompressed != data:
+                    data = decompressed
+                    content_encoding = ""
+
+            # Inject locale/language if HTML file
+            if content_type == "text/html":
+                try:
+                    locale_json = Path(self.directory) / ".jaguar-locale.json"
+                    if locale_json.exists():
+                        import json
+                        locale_meta = json.loads(locale_json.read_text(encoding="utf-8"))
+                        locale = locale_meta.get("locale", "en-US")
+                        language = locale_meta.get("language", "en")
+                    else:
+                        locale = "en-US"
+                        language = "en"
+
+                    html_text = data.decode("utf-8", errors="replace")
+
+                    # Force html lang attribute matching the clone language
+                    html_text = re.sub(r'(<html[^>]*\blang=["\'])([^"\']*)(["\'])', rf'\g<1>{language}\3', html_text, flags=re.IGNORECASE)
+
+                    # Inject navigator.language script override
+                    script_inject = f"""<script>
+(function() {{
+    const targetLocale = "{locale}";
+    const targetLanguage = "{language}";
+    const targetLanguages = ["{locale}", targetLanguage];
+    Object.defineProperty(navigator, 'language', {{ get: () => targetLocale, configurable: true }});
+    Object.defineProperty(navigator, 'languages', {{ get: () => targetLanguages, configurable: true }});
+    document.cookie = "lang=" + targetLanguage + "; path=/";
+    document.cookie = "language=" + targetLanguage + "; path=/";
+    document.cookie = "locale=" + targetLocale + "; path=/";
+    document.cookie = "NEXT_LOCALE=" + targetLocale + "; path=/";
+    document.cookie = "GH_LOCALE=" + targetLocale + "; path=/";
+}})();
+</script>"""
+                    if "<head>" in html_text:
+                        html_text = html_text.replace("<head>", f"<head>{script_inject}", 1)
+                    elif "<HEAD>" in html_text:
+                        html_text = html_text.replace("<HEAD>", f"<HEAD>{script_inject}", 1)
+                    else:
+                        html_text = script_inject + html_text
+
+                    data = html_text.encode("utf-8")
+                except Exception as ex:
+                    logger.debug("Failed to inject language override: %s", ex)
+
+            import io
+            f_out = io.BytesIO(data)
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            if content_encoding:
+                self.send_header("Content-Encoding", content_encoding)
+            if cache_control:
+                self.send_header("Cache-Control", cache_control)
+
+            # Set cookies for language/locale in response
+            try:
+                locale_json = Path(self.directory) / ".jaguar-locale.json"
+                if locale_json.exists():
+                    import json
+                    locale_meta = json.loads(locale_json.read_text(encoding="utf-8"))
+                    locale = locale_meta.get("locale", "en-US")
+                    language = locale_meta.get("language", "en")
+                    self.send_header("Set-Cookie", f"lang={language}; Path=/")
+                    self.send_header("Set-Cookie", f"language={language}; Path=/")
+                    self.send_header("Set-Cookie", f"locale={locale}; Path=/")
+                    self.send_header("Set-Cookie", f"NEXT_LOCALE={locale}; Path=/")
+                    self.send_header("Set-Cookie", f"GH_LOCALE={locale}; Path=/")
+            except Exception:
+                pass
+
+            # Enable CORS for AJAX and assets
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+            self.send_header("Access-Control-Allow-Headers", "*")
+            self.end_headers()
+            return f_out
+
+        return super().send_head()
 
     def list_directory(self, path: str | os.PathLike[str]) -> Any:
         """Override directory listing to prevent leaking user files. Return offline placeholder instead."""
@@ -257,7 +454,6 @@ class SPARequestHandler(SimpleHTTPRequestHandler):
         return None
 
     def log_message(self, format: str, *args: Any) -> None:
-        # Suppress standard HTTP logs unless it's an error to keep console clean during SPA testing
         pass
 
     def guess_type(self, path: str | os.PathLike[str]) -> str:
@@ -282,7 +478,7 @@ class SPARequestHandler(SimpleHTTPRequestHandler):
         if dest == "font":
             return "font/woff2"
 
-        return str(super().guess_type(path))
+        return super().guess_type(path)
 
     def end_headers(self) -> None:
         try:
@@ -293,8 +489,6 @@ class SPARequestHandler(SimpleHTTPRequestHandler):
             if os.path.exists(meta_path):
                 with open(meta_path) as f:
                     meta = json.load(f)
-                if meta.get("Content-Encoding"):
-                    self.send_header("Content-Encoding", meta["Content-Encoding"])
                 if meta.get("Cache-Control"):
                     self.send_header("Cache-Control", meta["Cache-Control"])
         except Exception:
@@ -310,43 +504,42 @@ class CloneServer:
         self.port = port
         self.server: TCPServer | None = None
         self.thread: threading.Thread | None = None
+        self._stopped = False
+        self._serving = False
+        self._lock = threading.Lock()
 
     def start(self) -> str:
         """Start the server in a background thread."""
-        if not os.path.exists(self.directory):
-            raise FileNotFoundError(f"Directory {self.directory} does not exist.")
+        with self._lock:
+            if self.server or self._stopped:
+                raise RuntimeError("Server is already running or has been stopped.")
 
-        # Ensure directory is actually a valid clone (must contain some HTML)
-        root = Path(self.directory)
-        if not (root / "index.html").exists() and not list(root.rglob("*.html")) and not list(root.rglob("*.php")):
-            raise ValueError(f"Refusing to serve {self.directory}: Not a valid JAGUAR clone (no HTML or PHP files found). This prevents accidental exposure of user directories.")
+            if not os.path.exists(self.directory):
+                raise FileNotFoundError(f"Directory {self.directory} does not exist.")
 
-        # Ensure entry point exists
-        entry = ensure_root_index(self.directory)
-        if not entry:
-            raise ValueError(f"Refusing to serve {self.directory}: Entry point could not be detected.")
+            # Ensure directory is actually a valid clone
+            root = Path(self.directory)
+            if not (root / "index.html").exists() and not list(root.rglob("*.html")) and not list(root.rglob("*.php")):
+                raise ValueError(f"Refusing to serve {self.directory}: Not a valid JAGUAR clone.")
 
-        entry_path = os.path.abspath(os.path.join(self.directory, entry))
-        if not os.path.exists(entry_path):
-            raise FileNotFoundError(f"Refusing to serve {self.directory}: Detected entry point '{entry}' does not exist.")
+            entry = ensure_root_index(self.directory)
+            if not entry:
+                raise ValueError(f"Refusing to serve {self.directory}: Entry point could not be detected.")
 
-        # Ensure it is inside the clone root directory (prevent path traversal / exposing parent directories)
-        common_path = os.path.commonpath([self.directory, entry_path])
-        if common_path != self.directory:
-            raise PermissionError(f"Refusing to serve {self.directory}: Entry point '{entry}' is outside the clone directory.")
+            entry_path = os.path.abspath(os.path.join(self.directory, entry))
+            if not os.path.exists(entry_path):
+                raise FileNotFoundError(f"Refusing to serve {self.directory}: Detected entry point '{entry}' does not exist.")
 
-        logger.info("Auto-detected entry point: %s", entry)
+            common_path = os.path.commonpath([self.directory, entry_path])
+            if common_path != self.directory:
+                raise PermissionError(f"Refusing to serve {self.directory}: Entry point '{entry}' is outside the clone directory.")
 
-        import functools
-        # Bind the directory to the handler class so SimpleHTTPRequestHandler
-        # uses it as self.directory (instead of os.getcwd())
-        handler = functools.partial(SPARequestHandler, directory=self.directory)
+            logger.info("Auto-detected entry point: %s", entry)
 
-        try:
-            # allow_reuse_address prevents "Address already in use" errors
+            import functools
+            handler = functools.partial(SPARequestHandler, directory=self.directory)
+
             TCPServer.allow_reuse_address = True
-
-            # Find an available port if default is taken
             max_attempts = 10
             for i in range(max_attempts):
                 try:
@@ -359,24 +552,53 @@ class CloneServer:
                     raise
 
             assert self.server is not None
-
-            self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self._stopped = False
+            self.thread = threading.Thread(target=self._run_server, daemon=True)
             self.thread.start()
 
             url = f"http://localhost:{self.port}"
             logger.info("Serving %s at %s", self.directory, url)
             return url
 
-        except Exception:
-            raise
+    def _run_server(self) -> None:
+        """Target for serve_forever thread."""
+        with self._lock:
+            if not self.server or self._stopped:
+                return
+            server = self.server
+            self._serving = True
+        try:
+            server.serve_forever()
+        finally:
+            with self._lock:
+                self._serving = False
 
     def stop(self) -> None:
         """Stop the background server."""
-        if self.server:
+        with self._lock:
+            server = self.server
+            if self._stopped or not server:
+                return
+            self._stopped = True
+
+            # 1. shutdown serve_forever loop first, only if serving
+            if self._serving:
+                try:
+                    server.shutdown()
+                except Exception:
+                    pass
+            # 2. close socket
             try:
-                self.server.server_close()
+                server.server_close()
             except Exception:
                 pass
             self.server = None
-        self.thread = None
-        logger.info("Clone server stopped.")
+
+            # 3. wait for thread to terminate to ensure no thread runs after close
+            if self.thread:
+                try:
+                    self.thread.join(timeout=2.0)
+                except Exception:
+                    pass
+                self.thread = None
+            logger.info("Clone server stopped.")

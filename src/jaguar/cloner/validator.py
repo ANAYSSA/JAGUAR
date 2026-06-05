@@ -83,13 +83,9 @@ class CloneReport:
             score = min(score, 80.0)
 
         if self.has_rendering_errors or self.rendering_error_logs:
-            error_count = len(self.rendering_error_logs) or 1
-            score = min(score, 90.0)
-            score -= min(30.0, error_count * 1.5)
+            score = min(score, 80.0)
 
         if self.visual_accuracy is not None:
-            if self.visual_accuracy < 100.0:
-                score = min(score, self.visual_accuracy)
             if self.visual_accuracy < 80.0:
                 score = min(score, 50.0)
             elif self.visual_accuracy < 90.0:
@@ -311,7 +307,8 @@ class CloneValidator:
             logger.info("[DEBUG VALIDATOR] new_page() returned")
 
             def handle_console(msg: ConsoleMessage) -> None:
-                if msg.type in ("error", "warning") and "Failed to load resource" in msg.text or msg.type == "error":
+                msg_lower = msg.text.lower()
+                if msg.type == "error" or (msg.type == "warning" and ("failed" in msg_lower or "cors" in msg_lower or "mime" in msg_lower or "decode" in msg_lower)):
                     report.has_rendering_errors = True
                     report.rendering_error_logs.append(f"[Console] {msg.text}")
 

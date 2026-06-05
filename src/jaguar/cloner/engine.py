@@ -166,6 +166,7 @@ class ClonerEngine:
                 )
                 await self.browser_manager.start()  # type: ignore
                 self.spa_renderer = SPARenderer(self.browser_manager)
+                self.spa_renderer.clone_dir = target_dir
             except ImportError:
                 logger.warning("Playwright not installed. SPA rendering disabled.")
                 self.render_spa = False
@@ -206,30 +207,92 @@ class ClonerEngine:
                     for _ in range(self.concurrency)
                 ]
 
-                # Start deadlock monitor
-                monitor_task = asyncio.create_task(self._monitor_deadlock(page_workers + asset_workers))
+                # Wait for queues to empty, controlling progress and detecting stalls
+                stalls = 0
+                last_visited = 0
+                last_assets = 0
+                last_failed_assets = 0
+                last_queue_size = -1
 
-                # Wait for queues to empty
                 try:
-                    await asyncio.wait_for(self._queue.join(), timeout=300)
-                    await asyncio.wait_for(self._assets_queue.join(), timeout=300)
-                except TimeoutError:
-                    logger.error("Queue join timed out! Possible deadlock or extremely slow downloads.")
+                    while True:
+                        await asyncio.sleep(1)
+
+                        current_visited = len(self._visited)
+                        current_assets = len(self._assets_visited)
+                        current_failed_assets = self.failed_assets_count
+                        current_queue_size = self._queue.qsize() + self._assets_queue.qsize()
+
+                        if (current_visited == last_visited and
+                            current_assets == last_assets and
+                            current_failed_assets == last_failed_assets and
+                            current_queue_size == last_queue_size):
+                            stalls += 1
+                        else:
+                            stalls = 0
+
+                        last_visited = current_visited
+                        last_assets = current_assets
+                        last_failed_assets = current_failed_assets
+                        last_queue_size = current_queue_size
+
+                        # Check if done: queues empty and no fetches active
+                        if current_queue_size == 0 and len(self._active_fetches) == 0:
+                            await asyncio.sleep(0.5)
+                            if self._queue.empty() and self._assets_queue.empty() and len(self._active_fetches) == 0:
+                                break
+
+                        if stalls >= 15:
+                            logger.error("\n\033[91m[DEADLOCK DETECTED] Clone stalled for 15s!\033[0m")
+                            logger.error("Reason: Progress did not change for 15 consecutive seconds.")
+
+                            logger.error("\n--- Active Asyncio Tasks ---")
+                            try:
+                                for t in asyncio.all_tasks():
+                                    logger.error(f"  Task {t.get_name()}: coro={t.get_coro()}")
+                            except Exception as e:
+                                logger.error(f"  Failed to dump tasks: {e}")
+
+                            logger.error(f"Current URL: {getattr(self, 'current_url', 'Unknown')}")
+
+                            logger.error("\n--- Worker States ---")
+                            for k, v in self._worker_states.items():
+                                logger.error(f"  {k}: {v}")
+
+                            logger.error("\n--- Queue State ---")
+                            logger.error(f"  Page Queue Size: {self._queue.qsize()}")
+                            logger.error(f"  Asset Queue Size: {self._assets_queue.qsize()}")
+
+                            logger.error("\n--- Pending Requests ---")
+                            for req_url in self._active_fetches:
+                                logger.error(f"  Fetching: {req_url}")
+
+                            break
                 finally:
-                    monitor_task.cancel()
+                    # Cancel workers
+                    for w in page_workers + asset_workers:
+                        w.cancel()
 
-                # Cancel workers
-                for w in page_workers + asset_workers:
-                    w.cancel()
-
-                # Await cancellation
-                await asyncio.gather(*(page_workers + asset_workers), return_exceptions=True)
+                    # Await cancellation
+                    await asyncio.gather(*(page_workers + asset_workers), return_exceptions=True)
 
             logger.info(
                 "Cloning complete. Downloaded %d pages and %d assets.",
                 len(self._visited),
                 len(self._assets_visited),
             )
+
+            # Save locale info for serving later
+            try:
+                locale_data = {
+                    "locale": self.site_language,
+                    "language": self.site_language.split("-")[0],
+                    "accept_language": f"{self.site_language},{self.site_language.split('-')[0]};q=0.9,en;q=0.8"
+                }
+                import json
+                (target_dir / ".jaguar-locale.json").write_text(json.dumps(locale_data), encoding="utf-8")
+            except Exception as e:
+                logger.warning("Failed to save locale info: %s", e)
 
             # Post-clone phases while browser is still active
             await self._post_clone(target_dir)
@@ -297,83 +360,7 @@ class ClonerEngine:
 
     async def _monitor_deadlock(self, workers: list[asyncio.Task[Any]]) -> None:
         """Monitor queues and workers to detect infinite clone deadlocks."""
-        last_visited = 0
-        last_assets = 0
-        stalls = 0
-
-        while True:
-            await asyncio.sleep(1)
-            current_visited = len(self._visited)
-            current_assets = len(self._assets_visited)
-
-            if current_visited == last_visited and current_assets == last_assets:
-                stalls += 1
-            else:
-                stalls = 0
-
-            if stalls >= 15:
-                logger.error("\n\033[91m[DEADLOCK DETECTED] Clone stalled for 15s!\033[0m")
-                logger.error(f"Reason: Progress did not change for 15 consecutive seconds. Visited: {current_visited}, Assets: {current_assets}")
-                logger.error(f"Current URL: {getattr(self, 'current_url', 'Unknown')}")
-                logger.error(f"Visited count: {len(self._visited)}")
-                logger.error(f"Assets count: {len(self._assets_visited)}")
-
-                logger.error("\n--- Active Asyncio Tasks ---")
-                try:
-                    for t in asyncio.all_tasks():
-                        logger.error(f"  Task {t.get_name()}: coro={t.get_coro()}")
-                except Exception as e:
-                    logger.error(f"  Failed to dump tasks: {e}")
-
-                logger.error("\n--- Worker States ---")
-                for k, v in self._worker_states.items():
-                    logger.error(f"  {k}: {v}")
-
-                logger.error("\n--- Queue Contents ---")
-                logger.error(f"  Page Queue Size: {self._queue.qsize()}")
-                try:
-                    page_items = list(getattr(self._queue, "_queue", []))
-                    for item in page_items[:10]:
-                        logger.error(f"    - {item}")
-                    if len(page_items) > 10:
-                        logger.error(f"    ... and {len(page_items)-10} more")
-                except Exception:
-                    pass
-
-                logger.error(f"  Asset Queue Size: {self._assets_queue.qsize()}")
-                try:
-                    asset_items = list(getattr(self._assets_queue, "_queue", []))
-                    for item in asset_items[:10]:
-                        logger.error(f"    - {item}")
-                    if len(asset_items) > 10:
-                        logger.error(f"    ... and {len(asset_items)-10} more")
-                except Exception:
-                    pass
-
-                logger.error("\n--- Pending Requests ---")
-                for req_url in self._active_fetches:
-                    logger.error(f"  Fetching: {req_url}")
-                logger.error("Dumping pending futures and forcing exit...")
-
-                for w in workers:
-                    w.cancel()
-                # Unblock the join
-                while not self._queue.empty():
-                    try:
-                        self._queue.get_nowait()
-                        self._queue.task_done()
-                    except asyncio.QueueEmpty:
-                        break
-                while not self._assets_queue.empty():
-                    try:
-                        self._assets_queue.get_nowait()
-                        self._assets_queue.task_done()
-                    except asyncio.QueueEmpty:
-                        break
-                break
-
-            last_visited = current_visited
-            last_assets = current_assets
+        pass
 
     async def _page_worker(self, base_dir: Path) -> None:
         """Worker that processes HTML pages."""
@@ -557,12 +544,13 @@ class ClonerEngine:
 
         try:
             self._active_fetches.add(url)
-            async with self.http._session.get(url) as response:  # type: ignore
-                if response.status != 200:
-                    return
+            async with asyncio.timeout(20.0):
+                async with self.http._session.get(url) as response:  # type: ignore
+                    if response.status != 200:
+                        return
 
-                content_type = response.headers.get("Content-Type", "")
-                content = await response.read()
+                    content_type = response.headers.get("Content-Type", "")
+                    content = await response.read()
 
                 # If it's CSS, rewrite url() paths
                 if "text/css" in content_type:
@@ -597,8 +585,9 @@ class ClonerEngine:
 
     def _url_to_local_path(self, url: str, base_dir: Path, is_html: bool) -> Path:
         """Convert a URL to an absolute filesystem path within base_dir."""
+        from urllib.parse import unquote
         parsed = urlparse(url)
-        path = parsed.path
+        path = unquote(parsed.path)
 
         if not path or path == "/":
             path = "/index.html"

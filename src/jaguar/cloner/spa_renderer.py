@@ -21,6 +21,7 @@ class SPARenderer:
     def __init__(self, browser_manager: Any):
         """Initialize with a BrowserManager instance."""
         self.browser = browser_manager
+        self.clone_dir: Any = None
 
     async def render_to_static_html(self, url: str, locale: str | None = None) -> str:
         """
@@ -32,6 +33,55 @@ class SPARenderer:
         page = None
         try:
             page = await self.browser.new_page(locale=locale)
+
+            # Setup AJAX cache hook if clone_dir is set
+            clone_dir = getattr(self, "clone_dir", None)
+            if clone_dir:
+                from pathlib import Path
+                ajax_cache_dir = Path(clone_dir) / ".jaguar-ajax-cache"
+                ajax_cache_dir.mkdir(parents=True, exist_ok=True)
+
+                async def save_ajax_response(response: Any) -> None:
+                    try:
+                        req = response.request
+                        if req.resource_type in ("xhr", "fetch"):
+                            if req.headers.get("authorization"):
+                                return
+
+                            try:
+                                body_bytes = await response.body()
+                            except Exception:
+                                return
+
+                            import hashlib
+                            import json
+                            from urllib.parse import urlparse
+
+                            method = req.method.upper()
+                            post_data = req.post_data or ""
+
+                            parsed_url = urlparse(req.url)
+                            cache_key_src = f"{parsed_url.path}?{parsed_url.query}\n{method}\n{post_data}"
+                            cache_hash = hashlib.sha256(cache_key_src.encode("utf-8")).hexdigest()
+
+                            meta = {
+                                "url": req.url,
+                                "method": method,
+                                "post_data": post_data,
+                                "content_type": response.headers.get("content-type", "application/json"),
+                                "status": response.status,
+                            }
+
+                            meta_file = ajax_cache_dir / f"{cache_hash}.meta.json"
+                            body_file = ajax_cache_dir / f"{cache_hash}.body"
+
+                            meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                            body_file.write_bytes(body_bytes)
+                            logger.debug("Cached AJAX response: %s %s -> %s", method, req.url, cache_hash)
+                    except Exception as e:
+                        logger.debug("Failed to cache AJAX response: %s", e)
+
+                page.on("response", save_ajax_response)
 
             # Navigate and wait for network to be idle (JS loaded)
             await self.browser.navigate_and_wait(page, url, wait_until="networkidle")

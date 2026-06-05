@@ -110,11 +110,16 @@ class VisualCompare:
             _clone_dir = str(self.clone_dir)
 
             class Handler(http.server.SimpleHTTPRequestHandler):
+                protocol_version = "HTTP/1.0"
                 def __init__(self, *args: object, **kwargs: object) -> None:
                     super().__init__(*args, directory=_clone_dir, **kwargs)  # type: ignore[arg-type]
 
                 def log_message(self, format: str, *args: object) -> None:
                     pass  # Suppress logs
+
+                def handle(self) -> None:
+                    self.close_connection = True
+                    super().handle()
 
             socketserver.ThreadingTCPServer.allow_reuse_address = True
 
@@ -152,7 +157,15 @@ class VisualCompare:
                     await page.close()
             finally:
                 try:
+                    server.shutdown()
+                except Exception:
+                    pass
+                try:
                     server.server_close()
+                except Exception:
+                    pass
+                try:
+                    thread.join(timeout=2.0)
                 except Exception:
                     pass
 

@@ -79,8 +79,15 @@ class CSSResolver:
 
     async def resolve_all(self) -> CSSResolveResult:
         """Resolve all CSS files found in the clone directory."""
+        from jaguar.cloner.rebuilder import classify_file
         result = CSSResolveResult()
-        css_files = list(self.base_dir.rglob("*.css"))
+
+        css_files = []
+        for p in self.base_dir.rglob("*"):
+            if p.is_file() and not p.name.endswith(".meta.json") and ".jaguar-screenshots" not in p.parts and ".git" not in p.parts:
+                if classify_file(p) == "css":
+                    css_files.append(p)
+
         logger.info("Resolving CSS dependencies in %d files", len(css_files))
 
         for css_file in css_files:
