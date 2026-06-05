@@ -308,15 +308,17 @@ def clone(url: str, depth: int, pages: int, lang: str, spa: bool, serve: bool, v
 
         if serve:
             from jaguar.cloner.server import CloneServer
-            server = CloneServer(str(output_dir), port=8080)
-            serve_url = server.start()
-            click.echo(f"Serving at {serve_url}")
+            server = None
             try:
+                server = CloneServer(output_dir, port=8080)
+                serve_url = server.start()
+                click.echo(f"Serving at {serve_url}")
                 import time
                 while True:
                     time.sleep(1)
             except KeyboardInterrupt:
-                server.stop()
+                if server is not None:
+                    server.stop()
             except Exception as e:
                 click.echo(f"Error: {e}", err=True)
 
@@ -391,63 +393,58 @@ async def _doctor(path: str, deep: bool) -> None:
         click.echo("\n\033[96mRunning Deep Dynamic Browser Analysis (Playwright)...\033[0m")
         report = await validator._run_playwright_validation(report, "http://localhost:8080")
 
-        if report.rendering_error_logs:
-            issues_found = True
-            click.echo(f"\nFound {len(report.rendering_error_logs)} rendering issues:")
-            for err in report.rendering_error_logs[:15]:
-                err_lower = err.lower()
+        categories: dict[str, list[str]] = {
+            "MIME mismatch": [],
+            "font failures": [],
+            "ajax failures": [],
+            "cors failures": [],
+            "js exceptions": [],
+            "missing assets": [],
+            "routing failures": [],
+            "decoding failures": [],
+            "other failures": []
+        }
 
-                # Classify
-                category = "Rendering Failure"
-                reason = "Unknown browser runtime error"
-                url_match = re.search(r'(https?://[^\s]+)', err)
-                url = url_match.group(1) if url_match else "N/A"
-                file_path = urlparse(url).path.lstrip("/") if url != "N/A" else "N/A"
-                fix = "Check browser logs and layout rendering."
+        for err in report.rendering_error_logs:
+            err_lower = err.lower()
+            url_match = re.search(r'(https?://[^\s]+)', err)
+            url = url_match.group(1) if url_match else "N/A"
+            ext = Path(urlparse(url).path).suffix.lower() if url != "N/A" else ""
 
-                if "mime" in err_lower or "stylesheet" in err_lower or "corb" in err_lower:
-                    category = "MIME Failure"
-                    reason = "Served with incorrect MIME type or blocked by CORB (e.g. text/html instead of text/css)"
-                    fix = "Ensure sidecar .meta.json file contains the original server's Content-Type."
-                elif "encoding" in err_lower or "decoding" in err_lower or "decode" in err_lower:
-                    category = "Content-Encoding Failure"
-                    reason = "Failed to decode response content (e.g., gzip mismatch)"
-                    fix = "Verify if .meta.json contains 'Content-Encoding: gzip' without the file being compressed on disk."
-                elif "js exception" in err_lower or "uncaught" in err_lower or "pageerror" in err_lower:
-                    category = "JS Failure"
-                    reason = "JavaScript exception thrown at runtime"
-                    fix = "Check script execution details. Some scripts require online APIs or cookies."
-                elif "network" in err_lower or "failed to load" in err_lower or "net::" in err_lower:
-                    category = "Network Failure"
-                    reason = "Network request failed to load in the browser"
-                    fix = "Verify if the server was reachable or if the request is blocked by CORS/firewalls."
-                elif "404" in err_lower:
-                    ext = Path(urlparse(url).path).suffix.lower()
-                    if ext in (".html", ".php", ""):
-                        category = "Route Failure"
-                    else:
-                        category = "Missing Asset"
-                    reason = "Server returned HTTP 404 Not Found"
-                    fix = "Check if this asset is served dynamically or if it was skipped during crawler queue."
+            if "cors" in err_lower or "cross-origin" in err_lower or "allow-control-allow-origin" in err_lower:
+                categories["cors failures"].append(err)
+            elif "mime" in err_lower or "stylesheet" in err_lower or "corb" in err_lower:
+                categories["MIME mismatch"].append(err)
+            elif "font" in err_lower or ext in (".woff", ".woff2", ".ttf", ".otf", ".eot"):
+                categories["font failures"].append(err)
+            elif "ajax" in err_lower or "xhr" in err_lower or "xmlhttprequest" in err_lower or "fetch" in err_lower or "service.php" in err_lower or "service-nologin.php" in err_lower:
+                categories["ajax failures"].append(err)
+            elif "js exception" in err_lower or "uncaught" in err_lower or "pageerror" in err_lower or "exception" in err_lower:
+                categories["js exceptions"].append(err)
+            elif "encoding" in err_lower or "decoding" in err_lower or "decode" in err_lower or "decompression" in err_lower or "content_decoding" in err_lower:
+                categories["decoding failures"].append(err)
+            elif "404" in err_lower or "failed to load" in err_lower or "failed" in err_lower:
+                if ext in (".html", ".php", ""):
+                    categories["routing failures"].append(err)
+                else:
+                    categories["missing assets"].append(err)
+            else:
+                categories["other failures"].append(err)
 
-                click.echo(f"\n[Category]      \033[91m{category}\033[0m")
-                click.echo(f" [Reason]       {reason}")
-                click.echo(f" [URL]          {url}")
-                click.echo(f" [File]         {file_path}")
-                click.echo(f" [Way to Fix]   {fix}")
-                click.echo(f" [Original Log] {err}")
-
-            if len(report.rendering_error_logs) > 15:
-                click.echo(f"\n ... and {len(report.rendering_error_logs)-15} more dynamic rendering failures.")
+        for cat_name, items in categories.items():
+            if items:
+                issues_found = True
+                click.echo(f"\n--- \033[91mCategory: {cat_name}\033[0m ({len(items)} issues) ---")
+                for item in items[:15]:
+                    click.echo(f"  - {item}")
+                if len(items) > 15:
+                    click.echo(f"  ... and {len(items)-15} more.")
 
         # Check visual accuracy
         if report.visual_accuracy is not None and report.visual_accuracy < 90.0:
             issues_found = True
-            click.echo("\n[Category]      \033[91mRendering Failure\033[0m")
-            click.echo(" [Reason]       Visual mismatch detected between original page and clone")
-            click.echo(f" [URL]          {entry or 'Home'}")
-            click.echo(" [File]         None")
-            click.echo(f" [Way to Fix]   Visual accuracy is {report.visual_accuracy}%. Verify fonts, CSS, and layout rendering.")
+            click.echo("\n--- \033[91mCategory: routing failures\033[0m (Visual accuracy) ---")
+            click.echo(f"  - Visual mismatch detected between original page and clone ({report.visual_accuracy}% accuracy)")
 
     if not issues_found:
         click.echo("\n\033[92mClone Doctor found no issues! The clone is visually and structurally healthy.\033[0m")
@@ -570,6 +567,7 @@ def serve(path: str, port: int) -> None:
     from jaguar.cloner.server import CloneServer
     from jaguar.config import load_config
 
+    server = None
     try:
         cfg = load_config()
         clone_dir = Path(cfg["cloner"].get("clone_dir", "D:\\JAGUAR\\jaguar-clones"))
@@ -644,7 +642,8 @@ def serve(path: str, port: int) -> None:
             time.sleep(1)
     except KeyboardInterrupt:
         click.echo("\nStopping server...")
-        server.stop()
+        if server is not None:
+            server.stop()
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
 

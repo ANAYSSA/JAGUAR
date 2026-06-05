@@ -77,10 +77,46 @@ class CSSResolver:
         self.base_dir = base_dir
         self._resolved_urls: set[str] = set()
 
+    def _resolve_file_dir_conflict(self, path: Path) -> None:
+        """
+        Ensure no parent directory of path is actually a file on disk.
+        If a parent directory is a file, convert it to a directory
+        and move its contents to that directory's index.html.
+        """
+        for parent in list(path.parents)[::-1]:
+            if parent.exists() and parent.is_file():
+                logger.info("Converting conflicting file %s to directory to allow subpaths", parent)
+                try:
+                    content = parent.read_bytes()
+                    meta_path = parent.with_name(parent.name + ".meta.json")
+                    meta_content = None
+                    if meta_path.exists() and meta_path.is_file():
+                        meta_content = meta_path.read_bytes()
+
+                    parent.unlink()
+                    if meta_path.exists() and meta_path.is_file():
+                        meta_path.unlink()
+
+                    parent.mkdir(parents=True, exist_ok=True)
+                    index_path = parent / "index.html"
+                    index_path.write_bytes(content)
+                    if meta_content is not None:
+                        new_meta_path = index_path.with_name(index_path.name + ".meta.json")
+                        new_meta_path.write_bytes(meta_content)
+                except Exception as e:
+                    logger.debug("Failed to resolve conflict at %s: %s", parent, e)
+
     async def resolve_all(self) -> CSSResolveResult:
         """Resolve all CSS files found in the clone directory."""
+        from jaguar.cloner.rebuilder import classify_file
         result = CSSResolveResult()
-        css_files = list(self.base_dir.rglob("*.css"))
+
+        css_files = []
+        for p in self.base_dir.rglob("*"):
+            if p.is_file() and not p.name.endswith(".meta.json") and ".jaguar-screenshots" not in p.parts and ".git" not in p.parts:
+                if classify_file(p) == "css":
+                    css_files.append(p)
+
         logger.info("Resolving CSS dependencies in %d files", len(css_files))
 
         for css_file in css_files:
@@ -125,6 +161,7 @@ class CSSResolver:
             if not local_path.exists():
                 content = await self._download(abs_url)
                 if content is not None:
+                    self._resolve_file_dir_conflict(local_path)
                     local_path.parent.mkdir(parents=True, exist_ok=True)
                     local_path.write_bytes(content)
                     result.imports_resolved += 1
@@ -160,6 +197,7 @@ class CSSResolver:
             if not local_path.exists():
                 content = await self._download(abs_url)
                 if content is not None:
+                    self._resolve_file_dir_conflict(local_path)
                     local_path.parent.mkdir(parents=True, exist_ok=True)
                     local_path.write_bytes(content)
                     result.assets_resolved += 1
@@ -215,6 +253,16 @@ class CSSResolver:
         path = posixpath.normpath(unquote(parsed.path))
         if not path or path == "/":
             path = "/index.css"
+
+        if parsed.query:
+            import hashlib
+            query_hash = hashlib.sha256(parsed.query.encode("utf-8")).hexdigest()[:8]
+            base, ext = posixpath.splitext(path)
+            if ext:
+                path = f"{base}_{query_hash}{ext}"
+            else:
+                path = f"{path}_{query_hash}"
+
         path = path.lstrip("/")
         return self.base_dir / path
 

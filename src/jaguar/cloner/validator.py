@@ -56,9 +56,12 @@ class CloneReport:
     visual_accuracy: float | None = None
     has_rendering_errors: bool = False
     rendering_error_logs: list[str] = field(default_factory=list)
+    language_mismatch: bool = False
 
     @property
     def overall_health(self) -> float:
+        if self.language_mismatch:
+            return 0.0
         cats = [self.html, self.css, self.js, self.images, self.fonts, self.svg, self.manifest, self.media, self.links]
         non_empty = [c for c in cats if c.total > 0]
         if not non_empty:
@@ -75,6 +78,10 @@ class CloneReport:
         if total_missing > 0:
             score -= min(40.0, total_missing * 2.0)
 
+        # Deduct 2.0 points per console/runtime error up to 50.0 points
+        if self.rendering_error_logs:
+            score -= min(50.0, len(self.rendering_error_logs) * 2.0)
+
         # Hard limits based on categories
         if self.css.total > 0 and self.css.missing:
             score = min(score, 80.0)
@@ -83,13 +90,9 @@ class CloneReport:
             score = min(score, 80.0)
 
         if self.has_rendering_errors or self.rendering_error_logs:
-            error_count = len(self.rendering_error_logs) or 1
             score = min(score, 90.0)
-            score -= min(30.0, error_count * 1.5)
 
         if self.visual_accuracy is not None:
-            if self.visual_accuracy < 100.0:
-                score = min(score, self.visual_accuracy)
             if self.visual_accuracy < 80.0:
                 score = min(score, 50.0)
             elif self.visual_accuracy < 90.0:
@@ -176,6 +179,25 @@ class CloneValidator:
 
     async def validate(self, base_url: str, browser_manager: Any = None) -> CloneReport:
         report = self._run_static_checks()
+
+        # Check language_report.json
+        try:
+            import json as _json
+            report_path = self.clone_dir / "language_report.json"
+            if report_path.exists():
+                lang_data = _json.loads(report_path.read_text(encoding="utf-8"))
+                req_lang = lang_data.get("requested_language", "").lower()
+                det_lang = lang_data.get("detected_html_lang")
+                det_lang_str = str(det_lang).lower() if det_lang else ""
+
+                if req_lang.startswith("en") and not det_lang_str.startswith("en"):
+                    logger.error(f"[VALIDATION FAILED] Language mismatch: requested={req_lang} but html lang={det_lang}")
+                    report.language_mismatch = True
+                    report.has_rendering_errors = True
+                    report.rendering_error_logs.append(f"[Language Mismatch] Requested {req_lang} but got {det_lang}")
+        except Exception as e:
+            logger.warning("Failed to check language validation: %s", e)
+
         report = await self._run_playwright_validation(report, base_url, browser_manager)
 
         logger.info("Clone health: %.1f%%", report.overall_health)
@@ -311,7 +333,8 @@ class CloneValidator:
             logger.info("[DEBUG VALIDATOR] new_page() returned")
 
             def handle_console(msg: ConsoleMessage) -> None:
-                if msg.type in ("error", "warning") and "Failed to load resource" in msg.text or msg.type == "error":
+                msg_lower = msg.text.lower()
+                if msg.type == "error" or (msg.type == "warning" and ("failed" in msg_lower or "cors" in msg_lower or "mime" in msg_lower or "decode" in msg_lower)):
                     report.has_rendering_errors = True
                     report.rendering_error_logs.append(f"[Console] {msg.text}")
 

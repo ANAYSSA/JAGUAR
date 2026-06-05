@@ -21,6 +21,11 @@ class SPARenderer:
     def __init__(self, browser_manager: Any):
         """Initialize with a BrowserManager instance."""
         self.browser = browser_manager
+        self.clone_dir: Any = None
+        self.browser_navigator_language = None
+        self.browser_navigator_languages = None
+        self.browser_cookies = None
+        self.browser_redirects: list[str] = []
 
     async def render_to_static_html(self, url: str, locale: str | None = None) -> str:
         """
@@ -33,8 +38,82 @@ class SPARenderer:
         try:
             page = await self.browser.new_page(locale=locale)
 
+            if locale:
+                lang_code = locale.split("-")[0].strip()
+                await page.context.add_cookies([
+                    {"name": "locale", "value": locale, "url": url},
+                    {"name": "lang", "value": lang_code, "url": url},
+                    {"name": "language", "value": lang_code, "url": url},
+                    {"name": "NEXT_LOCALE", "value": locale, "url": url},
+                    {"name": "GH_LOCALE", "value": locale, "url": url},
+                ])
+
+            # Setup AJAX cache hook if clone_dir is set
+            clone_dir = getattr(self, "clone_dir", None)
+            if clone_dir:
+                from pathlib import Path
+                ajax_cache_dir = Path(clone_dir) / ".jaguar-ajax-cache"
+                ajax_cache_dir.mkdir(parents=True, exist_ok=True)
+
+                async def save_ajax_response(response: Any) -> None:
+                    try:
+                        req = response.request
+                        if req.resource_type in ("xhr", "fetch"):
+                            if req.headers.get("authorization"):
+                                return
+
+                            try:
+                                body_bytes = await response.body()
+                            except Exception:
+                                return
+
+                            import hashlib
+                            import json
+                            from urllib.parse import urlparse
+
+                            method = req.method.upper()
+                            post_data = req.post_data or ""
+
+                            parsed_url = urlparse(req.url)
+                            cache_key_src = f"{parsed_url.path}?{parsed_url.query}\n{method}\n{post_data}"
+                            cache_hash = hashlib.sha256(cache_key_src.encode("utf-8")).hexdigest()
+
+                            meta = {
+                                "url": req.url,
+                                "method": method,
+                                "post_data": post_data,
+                                "content_type": response.headers.get("content-type", "application/json"),
+                                "status": response.status,
+                            }
+
+                            meta_file = ajax_cache_dir / f"{cache_hash}.meta.json"
+                            body_file = ajax_cache_dir / f"{cache_hash}.body"
+
+                            meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                            body_file.write_bytes(body_bytes)
+                            logger.debug("Cached AJAX response: %s %s -> %s", method, req.url, cache_hash)
+                    except Exception as e:
+                        logger.debug("Failed to cache AJAX response: %s", e)
+
+                page.on("response", save_ajax_response)
+
             # Navigate and wait for network to be idle (JS loaded)
-            await self.browser.navigate_and_wait(page, url, wait_until="networkidle")
+            response = await self.browser.navigate_and_wait(page, url, wait_until="networkidle")
+
+            # Capture redirects
+            if response:
+                req = response.request
+                while req.redirected_from:
+                    self.browser_redirects.append(req.redirected_from.url)
+                    req = req.redirected_from
+                self.browser_redirects.reverse()
+
+            try:
+                self.browser_navigator_language = await page.evaluate("navigator.language")
+                self.browser_navigator_languages = await page.evaluate("navigator.languages")
+                self.browser_cookies = await page.evaluate("document.cookie")
+            except Exception as e:
+                logger.debug("Failed to evaluate navigator info: %s", e)
 
             # Additional wait for frameworks that hydrate late
             # Check for common SPA root elements

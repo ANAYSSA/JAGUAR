@@ -72,6 +72,10 @@ class ClonerEngine:
         self.locale_override = locale_override
         self.system_language = "Unknown"
         self.final_site_language = "Unknown"
+        self.browser_navigator_language: str | None = None
+        self.browser_navigator_languages: list[str] | None = None
+        self.all_cookies: list[str] = []
+        self.all_redirects: list[str] = []
 
     def _determine_locale(self) -> None:
         """Determine the final locale to use based on strict priority."""
@@ -166,6 +170,7 @@ class ClonerEngine:
                 )
                 await self.browser_manager.start()  # type: ignore
                 self.spa_renderer = SPARenderer(self.browser_manager)
+                self.spa_renderer.clone_dir = target_dir
             except ImportError:
                 logger.warning("Playwright not installed. SPA rendering disabled.")
                 self.render_spa = False
@@ -173,10 +178,21 @@ class ClonerEngine:
         self._determine_locale()
         accept_lang = self._get_accept_language_header()
 
+        lang_code = self.site_language.split("-")[0].strip()
+        cookie_header = (
+            f"locale={self.site_language}; "
+            f"lang={lang_code}; "
+            f"language={lang_code}; "
+            f"NEXT_LOCALE={self.site_language}; "
+            f"GH_LOCALE={self.site_language}"
+        )
         http_config = HttpClientConfig(
             max_retries=2,
             timeout=aiohttp.ClientTimeout(total=30),
-            headers={"Accept-Language": accept_lang},
+            headers={
+                "Accept-Language": accept_lang,
+                "Cookie": cookie_header,
+            },
         )
 
         # Enqueue start URL
@@ -206,24 +222,84 @@ class ClonerEngine:
                     for _ in range(self.concurrency)
                 ]
 
-                # Start deadlock monitor
-                monitor_task = asyncio.create_task(self._monitor_deadlock(page_workers + asset_workers))
+                # Wait for queues to empty, controlling progress and detecting stalls
+                stalls = 0
+                last_visited = 0
+                last_assets = 0
+                last_queue_size = -1
+                last_active_tasks = 0
 
-                # Wait for queues to empty
                 try:
-                    await asyncio.wait_for(self._queue.join(), timeout=300)
-                    await asyncio.wait_for(self._assets_queue.join(), timeout=300)
-                except TimeoutError:
-                    logger.error("Queue join timed out! Possible deadlock or extremely slow downloads.")
+                    while True:
+                        await asyncio.sleep(1)
+
+                        current_visited = len(self._visited)
+                        current_assets = len(self._assets_visited)
+                        current_queue_size = self._queue.qsize() + self._assets_queue.qsize()
+                        current_active_tasks = len(self._active_fetches)
+
+                        active_workers = len([k for k, v in self._worker_states.items() if v != "waiting for task" and v != "cancelled"])
+                        pending_tasks = len(self._active_fetches)
+
+                        if (current_visited == last_visited and
+                            current_assets == last_assets and
+                            current_queue_size == last_queue_size and
+                            current_active_tasks == last_active_tasks):
+                            stalls += 1
+                        else:
+                            stalls = 0
+
+                        last_visited = current_visited
+                        last_assets = current_assets
+                        last_queue_size = current_queue_size
+                        last_active_tasks = current_active_tasks
+
+                        # Check if done: queue empty, workers idle, pending tasks 0
+                        if current_queue_size == 0 and active_workers == 0 and pending_tasks == 0:
+                            logger.info("\nQueue empty")
+                            logger.info("Workers idle")
+                            logger.info("Pending tasks 0")
+                            logger.info("Finalizing clone")
+                            break
+
+                        if stalls >= 15:
+                            logger.error("\n\033[91m[DEADLOCK DETECTED] Clone stalled for 15s!\033[0m")
+                            logger.error("Reason: Processed URLs, downloaded assets, queue size, and active task count remained unchanged for 15 consecutive seconds.")
+
+                            logger.error("\n--- Active Asyncio Tasks ---")
+                            try:
+                                for t in asyncio.all_tasks():
+                                    logger.error(f"  Task {t.get_name()}: coro={t.get_coro()}")
+                            except Exception as e:
+                                logger.error(f"  Failed to dump tasks: {e}")
+
+                            logger.error(f"Current URL: {getattr(self, 'current_url', 'Unknown')}")
+
+                            logger.error("\n--- Worker States ---")
+                            for k, v in self._worker_states.items():
+                                logger.error(f"  {k}: {v}")
+
+                            logger.error("\n--- Queue Contents ---")
+                            try:
+                                page_items = list(getattr(self._queue, "_queue", []))
+                                asset_items = list(getattr(self._assets_queue, "_queue", []))
+                                logger.error(f"  Page Queue: {page_items}")
+                                logger.error(f"  Asset Queue: {asset_items}")
+                            except Exception as e:
+                                logger.error(f"  Failed to dump queues: {e}")
+
+                            logger.error("\n--- Awaiting Futures / Pending Tasks ---")
+                            for req_url in self._active_fetches:
+                                logger.error(f"  Awaiting/Pending Fetch: {req_url}")
+
+                            break
                 finally:
-                    monitor_task.cancel()
+                    # Cancel workers
+                    for w in page_workers + asset_workers:
+                        w.cancel()
 
-                # Cancel workers
-                for w in page_workers + asset_workers:
-                    w.cancel()
-
-                # Await cancellation
-                await asyncio.gather(*(page_workers + asset_workers), return_exceptions=True)
+                    # Await cancellation
+                    await asyncio.gather(*(page_workers + asset_workers), return_exceptions=True)
 
             logger.info(
                 "Cloning complete. Downloaded %d pages and %d assets.",
@@ -231,8 +307,38 @@ class ClonerEngine:
                 len(self._assets_visited),
             )
 
+            # Save locale info for serving later
+            try:
+                locale_data = {
+                    "locale": self.site_language,
+                    "language": self.site_language.split("-")[0],
+                    "accept_language": f"{self.site_language},{self.site_language.split('-')[0]};q=0.9,en;q=0.8"
+                }
+                import json
+                (target_dir / ".jaguar-locale.json").write_text(json.dumps(locale_data), encoding="utf-8")
+            except Exception as e:
+                logger.warning("Failed to save locale info: %s", e)
+
             # Post-clone phases while browser is still active
             await self._post_clone(target_dir)
+
+            # Verify local asset existence
+            missing_assets = []
+            for url in self._assets_visited:
+                local_path = self._url_to_local_path(url, target_dir, is_html=False)
+                if not local_path.exists() or local_path.stat().st_size == 0:
+                    missing_assets.append(url)
+
+            for url in self._visited:
+                local_path = self._url_to_local_path(url, target_dir, is_html=True)
+                if not local_path.exists() or local_path.stat().st_size == 0:
+                    missing_assets.append(url)
+
+            if missing_assets:
+                logger.error(f"\n\033[91m[CLONE INCOMPLETE] {len(missing_assets)} referenced assets or pages are missing or empty!\033[0m")
+                for u in missing_assets[:10]:
+                    logger.error(f"  Missing: {u}")
+                raise RuntimeError(f"Clone failed: {len(missing_assets)} referenced assets are missing.")
 
         finally:
             if self.browser_manager:
@@ -274,6 +380,43 @@ class ClonerEngine:
         except Exception as e:
             logger.warning("Rebuild failed: %s", e)
 
+        # Phase B.5: Write language report
+        try:
+            import json as _json
+
+            from bs4 import BeautifulSoup
+
+            from jaguar.cloner.server import detect_entry_point
+
+            entry = detect_entry_point(str(target_dir))
+            html_lang = None
+            if entry:
+                entry_file = target_dir / entry
+                if entry_file.exists():
+                    soup = BeautifulSoup(entry_file.read_text(encoding="utf-8", errors="replace"), "lxml")
+                    html_tag = soup.find("html")
+                    if html_tag and hasattr(html_tag, "get"):
+                        html_lang = html_tag.get("lang")
+
+            logger.info("=== LANGUAGE SOURCES DIAGNOSTIC DUMP ===")
+            logger.info(f"  Accept-Language Header: {self._get_accept_language_header()}")
+            logger.info(f"  Playwright Locale Option: {self.site_language}")
+            logger.info(f"  navigator.language: {getattr(self, 'browser_navigator_language', None)}")
+            logger.info(f"  navigator.languages: {getattr(self, 'browser_navigator_languages', None)}")
+            logger.info(f"  cookies: {list(set(self.all_cookies))}")
+            logger.info(f"  response redirects: {list(set(self.all_redirects))}")
+            logger.info(f"  Detected HTML Lang Attribute on Disk: {html_lang}")
+            logger.info("========================================")
+
+            lang_report = {
+                "requested_language": self.site_language,
+                "final_language": self.final_site_language,
+                "detected_html_lang": html_lang
+            }
+            (target_dir / "language_report.json").write_text(_json.dumps(lang_report, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning("Failed to create language_report.json: %s", e)
+
         # Phase C: Validate clone health (Universal Rendering Validation)
         logger.info("Phase: Validation (Playwright-based)")
         try:
@@ -297,83 +440,7 @@ class ClonerEngine:
 
     async def _monitor_deadlock(self, workers: list[asyncio.Task[Any]]) -> None:
         """Monitor queues and workers to detect infinite clone deadlocks."""
-        last_visited = 0
-        last_assets = 0
-        stalls = 0
-
-        while True:
-            await asyncio.sleep(1)
-            current_visited = len(self._visited)
-            current_assets = len(self._assets_visited)
-
-            if current_visited == last_visited and current_assets == last_assets:
-                stalls += 1
-            else:
-                stalls = 0
-
-            if stalls >= 15:
-                logger.error("\n\033[91m[DEADLOCK DETECTED] Clone stalled for 15s!\033[0m")
-                logger.error(f"Reason: Progress did not change for 15 consecutive seconds. Visited: {current_visited}, Assets: {current_assets}")
-                logger.error(f"Current URL: {getattr(self, 'current_url', 'Unknown')}")
-                logger.error(f"Visited count: {len(self._visited)}")
-                logger.error(f"Assets count: {len(self._assets_visited)}")
-
-                logger.error("\n--- Active Asyncio Tasks ---")
-                try:
-                    for t in asyncio.all_tasks():
-                        logger.error(f"  Task {t.get_name()}: coro={t.get_coro()}")
-                except Exception as e:
-                    logger.error(f"  Failed to dump tasks: {e}")
-
-                logger.error("\n--- Worker States ---")
-                for k, v in self._worker_states.items():
-                    logger.error(f"  {k}: {v}")
-
-                logger.error("\n--- Queue Contents ---")
-                logger.error(f"  Page Queue Size: {self._queue.qsize()}")
-                try:
-                    page_items = list(getattr(self._queue, "_queue", []))
-                    for item in page_items[:10]:
-                        logger.error(f"    - {item}")
-                    if len(page_items) > 10:
-                        logger.error(f"    ... and {len(page_items)-10} more")
-                except Exception:
-                    pass
-
-                logger.error(f"  Asset Queue Size: {self._assets_queue.qsize()}")
-                try:
-                    asset_items = list(getattr(self._assets_queue, "_queue", []))
-                    for item in asset_items[:10]:
-                        logger.error(f"    - {item}")
-                    if len(asset_items) > 10:
-                        logger.error(f"    ... and {len(asset_items)-10} more")
-                except Exception:
-                    pass
-
-                logger.error("\n--- Pending Requests ---")
-                for req_url in self._active_fetches:
-                    logger.error(f"  Fetching: {req_url}")
-                logger.error("Dumping pending futures and forcing exit...")
-
-                for w in workers:
-                    w.cancel()
-                # Unblock the join
-                while not self._queue.empty():
-                    try:
-                        self._queue.get_nowait()
-                        self._queue.task_done()
-                    except asyncio.QueueEmpty:
-                        break
-                while not self._assets_queue.empty():
-                    try:
-                        self._assets_queue.get_nowait()
-                        self._assets_queue.task_done()
-                    except asyncio.QueueEmpty:
-                        break
-                break
-
-            last_visited = current_visited
-            last_assets = current_assets
+        pass
 
     async def _page_worker(self, base_dir: Path) -> None:
         """Worker that processes HTML pages."""
@@ -443,6 +510,18 @@ class ClonerEngine:
                     self.spa_renderer.render_to_static_html(url, locale=self.site_language),
                     timeout=20.0
                 )
+                browser_nav_lang = getattr(self.spa_renderer, "browser_navigator_language", None)
+                if browser_nav_lang is not None:
+                    self.browser_navigator_language = str(browser_nav_lang)
+                browser_nav_langs = getattr(self.spa_renderer, "browser_navigator_languages", None)
+                if browser_nav_langs is not None:
+                    self.browser_navigator_languages = browser_nav_langs
+                browser_cookies = getattr(self.spa_renderer, "browser_cookies", None)
+                if browser_cookies is not None:
+                    self.all_cookies.append(str(browser_cookies))
+                browser_redirects = getattr(self.spa_renderer, "browser_redirects", None)
+                if browser_redirects is not None:
+                    self.all_redirects.extend(browser_redirects)
             except Exception as e:
                 logger.warning("SPA render failed for %s, falling back to basic HTTP: %s", url, e)
             finally:
@@ -458,6 +537,10 @@ class ClonerEngine:
                     self._enqueue_asset(url)
                     return
                 html_content = response_obj.body
+                if response_obj.cookies:
+                    self.all_cookies.extend(f"{c['name']}={c['value']}" for c in response_obj.cookies)
+                if response_obj.redirect_history:
+                    self.all_redirects.extend(response_obj.redirect_history)
             except Exception as e:
                 logger.error("Failed to fetch %s: %s", url, e)
                 return
@@ -557,12 +640,13 @@ class ClonerEngine:
 
         try:
             self._active_fetches.add(url)
-            async with self.http._session.get(url) as response:  # type: ignore
-                if response.status != 200:
-                    return
+            async with asyncio.timeout(20.0):
+                async with self.http._session.get(url) as response:  # type: ignore
+                    if response.status != 200:
+                        return
 
-                content_type = response.headers.get("Content-Type", "")
-                content = await response.read()
+                    content_type = response.headers.get("Content-Type", "")
+                    content = await response.read()
 
                 # If it's CSS, rewrite url() paths
                 if "text/css" in content_type:
@@ -572,6 +656,13 @@ class ClonerEngine:
                         content = rewritten_css.encode("utf-8")
                     except UnicodeDecodeError:
                         pass  # Keep binary if decoding fails
+
+                # Capture redirects/cookies
+                if self.http and self.http._session:
+                    for cookie in self.http._session.cookie_jar:
+                        self.all_cookies.append(f"{cookie.key}={cookie.value}")
+                if response.history:
+                    self.all_redirects.extend(str(h.url) for h in response.history)
 
                 local_path = self._url_to_local_path(url, base_dir, is_html=False)
                 await self._save_file(local_path, content)
@@ -597,11 +688,23 @@ class ClonerEngine:
 
     def _url_to_local_path(self, url: str, base_dir: Path, is_html: bool) -> Path:
         """Convert a URL to an absolute filesystem path within base_dir."""
+        from urllib.parse import unquote
         parsed = urlparse(url)
-        path = parsed.path
+        path = unquote(parsed.path)
 
         if not path or path == "/":
             path = "/index.html"
+
+        # If there are query parameters, append hash to distinguish assets
+        if parsed.query:
+            import hashlib
+            import posixpath
+            query_hash = hashlib.sha256(parsed.query.encode("utf-8")).hexdigest()[:8]
+            base, ext = posixpath.splitext(path)
+            if ext:
+                path = f"{base}_{query_hash}{ext}"
+            else:
+                path = f"{path}_{query_hash}"
 
         # Ensure HTML files have extension
         if is_html and not path.split("/")[-1].count("."):
@@ -618,8 +721,38 @@ class ClonerEngine:
 
         return base_dir / path
 
+    def _resolve_file_dir_conflict(self, path: Path) -> None:
+        """
+        Ensure no parent directory of path is actually a file on disk.
+        If a parent directory is a file, convert it to a directory
+        and move its contents to that directory's index.html.
+        """
+        for parent in list(path.parents)[::-1]:
+            if parent.exists() and parent.is_file():
+                logger.info("Converting conflicting file %s to directory to allow subpaths", parent)
+                try:
+                    content = parent.read_bytes()
+                    meta_path = parent.with_name(parent.name + ".meta.json")
+                    meta_content = None
+                    if meta_path.exists() and meta_path.is_file():
+                        meta_content = meta_path.read_bytes()
+
+                    parent.unlink()
+                    if meta_path.exists() and meta_path.is_file():
+                        meta_path.unlink()
+
+                    parent.mkdir(parents=True, exist_ok=True)
+                    index_path = parent / "index.html"
+                    index_path.write_bytes(content)
+                    if meta_content is not None:
+                        new_meta_path = index_path.with_name(index_path.name + ".meta.json")
+                        new_meta_path.write_bytes(meta_content)
+                except Exception as e:
+                    logger.debug("Failed to resolve conflict at %s: %s", parent, e)
+
     async def _save_file(self, path: Path, data: bytes) -> None:
         """Save data to file, creating directories if needed."""
+        self._resolve_file_dir_conflict(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # Don't overwrite directories

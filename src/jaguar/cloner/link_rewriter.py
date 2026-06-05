@@ -147,6 +147,16 @@ class LinkRewriter:
         if not path or path == "/":
             path = "/index.html"
 
+        if parsed.query:
+            import hashlib
+            import posixpath
+            query_hash = hashlib.sha256(parsed.query.encode("utf-8")).hexdigest()[:8]
+            base, ext = posixpath.splitext(path)
+            if ext:
+                path = f"{base}_{query_hash}{ext}"
+            else:
+                path = f"{path}_{query_hash}"
+
         # Ensure HTML files have extension
         if not is_asset and not path.split("/")[-1].count("."):
             if not path.endswith("/"):
